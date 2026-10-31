@@ -20,7 +20,8 @@ from typing import ClassVar
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.containers import Horizontal, Vertical
+from textual.widgets import DataTable, Footer, Static
 
 from .cli import CLIENT, builder_rows, check_proof
 from .genesis import Genesis
@@ -33,15 +34,13 @@ MAX_LOG = 65536
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 
 _COLORS = {
-    "background": "#11111B",
-    "panel": "#1D1B2A",
-    "text": "#EDE9F5",
-    "muted": "#9995AC",
-    "purple": "#C4B5FD",
+    "background": "#000000",
+    "text": "#FFFFFF",
+    "muted": "#A0A0A0",
+    "blue": "#4287f5",
     "green": "#7DD3C0",
     "yellow": "#E6B86B",
     "red": "#D68198",
-    "border": "#353246",
 }
 _FONT = {
     "M": ["#   #", "## ##", "# # #", "#   #", "#   #"],
@@ -276,6 +275,18 @@ def _verdict_text(v: Verdict) -> Text:
     return Text(label, style=style)
 
 
+def _styled(value: str, colour: str = "text") -> Text:
+    return Text(value, style=_COLORS[colour])
+
+
+def _divider(width: int, split: int) -> Text:
+    """A single blue rule whose centre joins the peers/requests separator."""
+    if width <= 0:
+        return _styled("", "blue")
+    join = max(0, min(width - 1, split))
+    return _styled("─" * join + "┴" + "─" * (width - join - 1), "blue")
+
+
 # the app
 
 
@@ -286,44 +297,93 @@ class MatrixTui(App):
         background: {_COLORS["background"]};
         color: {_COLORS["text"]};
     }}
-    Header {{
-        background: {_COLORS["panel"]};
-        color: {_COLORS["purple"]};
-    }}
-    #status {{
-        height: 3;
-        padding: 0 1;
-        background: {_COLORS["panel"]};
-        border: round {_COLORS["border"]};
-    }}
-    DataTable {{
+    #dashboard {{
         height: 1fr;
-        background: {_COLORS["panel"]};
+        background: {_COLORS["background"]};
+        border: solid {_COLORS["blue"]};
+        border-title-color: {_COLORS["blue"]};
+    }}
+    #top {{
+        height: 52%;
+        min-height: 8;
+        background: {_COLORS["background"]};
+    }}
+    #peers-panel {{
+        width: 42%;
+        border-right: solid {_COLORS["blue"]};
+        background: {_COLORS["background"]};
+    }}
+    #requests-panel, #details-panel {{
+        width: 1fr;
+        background: {_COLORS["background"]};
+    }}
+    #details-panel {{
+        height: 1fr;
+    }}
+    .panel-title {{
+        height: 1;
+        padding: 0 1;
+        color: {_COLORS["blue"]};
+        background: {_COLORS["background"]};
+        text-style: bold;
+    }}
+    #divider {{
+        height: 1;
+        color: {_COLORS["blue"]};
+        background: {_COLORS["background"]};
+    }}
+    DataTable, #details, #extra {{
+        background: {_COLORS["background"]};
         color: {_COLORS["text"]};
-        border: round {_COLORS["border"]};
+        scrollbar-size: 0 0;
+    }}
+    DataTable, #details {{
+        height: 1fr;
+    }}
+    DataTable > .datatable--header {{
+        background: {_COLORS["background"]};
+        color: {_COLORS["blue"]};
     }}
     DataTable:focus {{
-        border: round {_COLORS["purple"]};
+        background-tint: {_COLORS["background"]} 0%;
+    }}
+    DataTable:focus > .datatable--header {{
+        background-tint: {_COLORS["background"]} 0%;
+    }}
+    DataTable:dark > .datatable--even-row {{
+        background: {_COLORS["background"]};
+    }}
+    DataTable > .datatable--even-row, DataTable > .datatable--odd-row,
+    DataTable > .datatable--cursor, DataTable:focus > .datatable--cursor,
+    DataTable > .datatable--fixed-cursor, DataTable > .datatable--header-cursor {{
+        background: {_COLORS["background"]};
+    }}
+    DataTable:focus > .datatable--cursor {{
+        color: {_COLORS["blue"]};
+        text-style: bold;
+    }}
+    #details {{
+        padding: 0 1;
+        overflow-y: auto;
     }}
     #extra {{
         height: auto;
-        max-height: 35%;
+        max-height: 40%;
+        padding: 0 1;
         overflow-y: auto;
-        background: {_COLORS["panel"]};
         color: {_COLORS["muted"]};
-        border: round {_COLORS["border"]};
     }}
-    Footer {{
-        background: {_COLORS["panel"]};
+    Footer, FooterKey, FooterLabel {{
+        background: {_COLORS["background"]};
         color: {_COLORS["muted"]};
     }}
     FooterKey .footer-key--key {{
-        color: {_COLORS["purple"]};
-        background: {_COLORS["panel"]};
+        color: {_COLORS["blue"]};
+        background: {_COLORS["background"]};
     }}
     FooterKey .footer-key--description {{
         color: {_COLORS["muted"]};
-        background: {_COLORS["panel"]};
+        background: {_COLORS["background"]};
     }}
     """
     BINDINGS: ClassVar = [
@@ -348,17 +408,31 @@ class MatrixTui(App):
         self._busy = False
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static(id="status")
-        yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
-        yield Static(id="extra")
-        yield Footer()
+        with Vertical(id="dashboard"):
+            with Horizontal(id="top"):
+                with Vertical(id="peers-panel"):
+                    yield Static(id="peers-title", classes="panel-title")
+                    yield DataTable(id="peers", cursor_type="none")
+                with Vertical(id="requests-panel"):
+                    yield Static(id="requests-title", classes="panel-title")
+                    yield DataTable(id="table", cursor_type="row")
+            yield Static(id="divider")
+            with Vertical(id="details-panel"):
+                yield Static(id="details-title", classes="panel-title")
+                yield Static(id="details")
+                yield Static(id="extra")
+        yield Footer(show_command_palette=False, compact=True)
 
     async def on_mount(self) -> None:
+        node = self.g.node(self.node_id)
+        self.query_one(
+            "#dashboard", Vertical
+        ).border_title = f"MATRIX · {node.operator} · {self.node_id}"
         if self.peers is None:
             self.peers = PeerClient(self.g, CLIENT)
         self.set_interval(1.0, self.poll)
         await self.poll()
+        self.query_one("#table", DataTable).focus()
 
     async def on_unmount(self) -> None:
         if self.peers is not None:
@@ -385,6 +459,7 @@ class MatrixTui(App):
     def action_show(self, view: str) -> None:
         self.view, self.extra, self.show_log = view, "", False
         self.render_view(reset=True)
+        self.query_one("#peers" if view == "builders" else "#table", DataTable).focus()
 
     async def action_toggle_log(self) -> None:
         if self.view != "detail" or self.detail_id is None or self.peers is None:
@@ -396,10 +471,12 @@ class MatrixTui(App):
         self.render_view()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "table":
+            return
         key = event.row_key.value
-        if self.view == "releases" and key:
+        if self.view in ("builders", "releases", "detail") and key:
             self.view, self.detail_id, self.show_log, self.extra = "detail", key, False, ""
-            self.render_view(reset=True)
+            self.render_view()
         elif self.view == "evidence" and key is not None:
             item = self.evidence[int(key)] if int(key) < len(self.evidence) else None
             if item is not None:
@@ -407,97 +484,122 @@ class MatrixTui(App):
                 self.extra = f"proof ({ok}):\n" + json.dumps(item.get("proof"), indent=2)
                 self.render_view()
 
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "table" and self.view != "evidence" and event.row_key:
+            self.detail_id = event.row_key.value
+            self._update_detail()
+
+    def on_resize(self) -> None:
+        if self.query("#divider"):
+            self._render_divider()
+
     # rendering
 
     def render_view(self, reset: bool = False) -> None:
+        peers = self.query_one("#peers", DataTable)
         table = self.query_one("#table", DataTable)
         row = 0 if reset else table.cursor_row
+        peers.clear(columns=True)
         table.clear(columns=True)
-        status = getattr(self, f"_render_{self.view}")(table)
-        reachable = sum(1 for h in self.health.values() if h is not None)
-        healthy = sum(
-            1
-            for n in self.g.nodes
-            if (h := self.health.get(n.id)) is not None
-            and h.get("genesis_hash") == self.g.hash
-            and h.get("node_id") == n.id
-        )
-        connection = (
-            _COLORS["green"]
-            if healthy == len(self.g.nodes)
-            else _COLORS["yellow"]
-            if reachable
-            else _COLORS["red"]
-        )
-        summary = Text.assemble(
-            (self.view.upper(), f"bold {_COLORS['purple']}"),
-            (f"  │  node {self.node_id}  │  ", _COLORS["muted"]),
-            (f"builders up {reachable}/{len(self.g.nodes)}", connection),
-            (f"  │  {status}", _COLORS["muted"]),
-        )
-        self.query_one("#status", Static).update(summary)
-        self.query_one("#extra", Static).update(Text(self.extra))
+        self._render_builders(peers)
+        if self.view == "evidence":
+            self.query_one("#requests-title", Static).update("EVIDENCE")
+            self._render_evidence(table)
+        else:
+            self.query_one("#requests-title", Static).update("REQUESTS")
+            self._render_releases(table)
+        self.query_one("#peers-title", Static).update(f"PEERS ({len(self.g.nodes)})")
         if table.row_count:
             table.move_cursor(row=min(row, table.row_count - 1))
+        self._update_detail()
+        self._render_divider()
 
-    def _render_builders(self, t: DataTable) -> str:
-        t.add_columns("operator", "builder", "address", "reachable", "genesis", "clock")
+    def _render_divider(self) -> None:
+        width = self.query_one("#divider", Static).size.width
+        split = self.query_one("#peers-panel", Vertical).size.width
+        self.query_one("#divider", Static).update(_divider(width, split))
+
+    def _render_builders(self, t: DataTable) -> None:
+        t.add_columns("node", "operator", "status", "genesis")
         for n in sorted(self.g.nodes, key=lambda n: n.operator):
             h = self.health.get(n.id)
             match = (
                 h is not None and h.get("genesis_hash") == self.g.hash and h.get("node_id") == n.id
             )
             t.add_row(
-                n.operator,
                 n.id,
-                n.addr,
-                Text("yes", _COLORS["green"]) if h else Text("no", _COLORS["red"]),
-                Text(
-                    "match" if match else "-" if h is None else "MISMATCH",
-                    _COLORS["green"]
-                    if match
-                    else _COLORS["muted"]
-                    if h is None
-                    else _COLORS["yellow"],
+                n.operator,
+                _styled("● UP" if h else "○ DOWN", "green" if h else "red"),
+                _styled(
+                    "✓" if match else "?" if h is None else "!", "green" if match else "yellow"
                 ),
-                Text(_time(h.get("now")) if h else "-", _COLORS["muted"]),
+                key=n.id,
             )
-        return f"genesis {self.g.hash[:16]}"
 
-    def _render_releases(self, t: DataTable) -> str:
-        t.add_columns("id", "release", "phase", "attested", "quorum", "verdict")
+    def _render_releases(self, t: DataTable) -> None:
+        t.add_columns("request", "attested", "quorum", "verdict")
         for r in self.releases:
             att, top = r.counts()
             name = f"{r.body['repo_url'].rsplit('/', 1)[-1]}@{r.body['tag']}" if r.body else "?"
+            request = Text.assemble(
+                (r.id[:8], _COLORS["muted"]),
+                (f"  {name}", _COLORS["text"]),
+                (f"\n{r.phase}", _COLORS["muted"]),
+            )
             t.add_row(
-                Text(r.id[:12], _COLORS["muted"]),
-                Text(name, _COLORS["purple"]),
-                Text(r.phase, _COLORS["muted"]),
-                f"{att}/{self.g.replicas}",
-                Text(
+                request,
+                _styled(f"{att}/{self.g.replicas}", "yellow" if att < self.g.replicas else "green"),
+                _styled(
                     f"{min(top, self.g.threshold)}/{self.g.threshold}",
-                    _COLORS["green"] if top >= self.g.threshold else _COLORS["yellow"],
+                    "green" if top >= self.g.threshold else "yellow",
                 ),
                 _verdict_text(r.verdict),
+                height=2,
                 key=r.id,
             )
-        return "Enter: detail"
 
-    def _render_detail(self, t: DataTable) -> str:
-        t.add_columns("builder", "operator", "result", "matches quorum")
+    def _update_detail(self) -> None:
         r = next((r for r in self.releases if r.id == self.detail_id), None)
         if r is None:
-            return f"release {self.detail_id or '?'} not on this node"
-        style = {
-            "ok": _COLORS["green"],
-            "DISAGREE": _COLORS["red"],
-            "EQUIVOCATION": _COLORS["red"],
-        }
-        for nid, op, res, mark in builder_rows(self.g, r.id, r.verdict):
-            colour = style.get(mark, _COLORS["yellow"])
-            t.add_row(nid, op, Text(res, colour), Text(mark or "-", colour))
-        name = f"{r.body['repo_url']}@{r.body['tag']}" if r.body else "?"
-        return f"{name}  " + _verdict_text(r.verdict).plain + "  l: log tail"
+            r = self.releases[0] if self.releases else None
+            self.detail_id = r.id if r else None
+        self.query_one("#details-title", Static).update(
+            f"REQUEST DETAILS · {r.id[:8]}" if r else "REQUEST DETAILS"
+        )
+        self.query_one("#details", Static).update(
+            self._render_detail(r) if r else _styled("No requests on this node", "muted")
+        )
+        self.query_one("#extra", Static).update(Text(self.extra))
+
+    def _render_detail(self, r: Release) -> Text:
+        lines = Text()
+        matched = 0
+        for nid, _, res, mark in builder_rows(self.g, r.id, r.verdict):
+            if mark == "ok":
+                label, colour = "MATCH", "green"
+                matched += 1
+            elif mark == "DISAGREE":
+                label, colour = "DISAGREES", "red"
+            elif mark == "EQUIVOCATION":
+                label, colour = "EQUIVOCATION", "red"
+            elif res == "-":
+                label, colour = "NO ATTESTATION", "yellow"
+            else:
+                label, colour = "PENDING", "yellow"
+            state = "--" if res == "-" else "FAILED" if res == "FAILED" else "ATTESTED"
+            result = "--" if res == "-" else res[:12] + ("…" if len(res) > 12 else "")
+            lines.append_text(_styled(f"{nid:<12} {state:<10} {result:<16} {label}\n", colour))
+        state = _verdict_text(r.verdict)
+        verdict = Text.assemble(
+            ("VERDICT: ", _COLORS["blue"]),
+            (state.plain, state.style),
+            (
+                f" · {matched}/{self.g.replicas} MATCHED · THRESHOLD: {self.g.threshold}",
+                _COLORS["muted"],
+            ),
+        )
+        lines.append_text(verdict)
+        return lines
 
     def _render_evidence(self, t: DataTable) -> str:
         t.add_columns("kind", "signer", "release", "time", "proof")
