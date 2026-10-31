@@ -144,11 +144,23 @@ async def _submit(peers: PeerClient, node: Node, env: dict) -> bool:
 
 
 def _submit_targets(g: Genesis) -> list[Node]:
-    """First node of each of the first f+1 operators: one of them is honest and forwards it."""
+    """First node of every operator, in genesis order (candidates for submission)."""
     first: dict[str, Node] = {}
     for n in g.nodes:
         first.setdefault(n.operator, n)
-    return list(first.values())[: g.f + 1]
+    return list(first.values())
+
+
+async def _submit_quorum(peers: PeerClient, g: Genesis, env: dict) -> int:
+    """Submit until f+1 distinct operators accepted: at most f are faulty, so one accepting
+    operator is honest and forwards the request. A single acceptance proves nothing (it may be
+    a faulty builder that drops it). Returns the number of operators that accepted."""
+    accepted = 0
+    for n in _submit_targets(g):
+        if accepted > g.f:
+            break
+        accepted += await _submit(peers, n, env)
+    return accepted
 
 
 async def collect(peers: PeerClient, g: Genesis, rid: str) -> tuple[dict[str, dict], set[str]]:
@@ -280,9 +292,9 @@ async def _release(a: argparse.Namespace, g: Genesis, sk: Any) -> int:
     _out(f"request {rid} {a.repo}@{a.tag}")
     peers = PeerClient(g, CLIENT)
     try:
-        accepted = await asyncio.gather(*(_submit(peers, n, env) for n in _submit_targets(g)))
-        if not any(accepted):
-            _err("no builder accepted the request")
+        accepted = await _submit_quorum(peers, g, env)
+        if accepted <= g.f:
+            _err(f"only {accepted} operators accepted the request; need {g.f + 1}")
             return EXIT_ERROR
         deadline = time.monotonic() + a.wait
         ever: set[str] = set()

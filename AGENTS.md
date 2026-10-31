@@ -161,7 +161,7 @@ The track tables below are the original plan. RFC rev 5 (4 laptops, one builder 
 | ID | Task | Depends | Accept | Hours |
 |---|---|---|---|---|
 | D1 | `cli` skeleton (`argparse`, exit codes), `keygen`, `verify` (offline) | A4 | `test_verify`: every RFC §6.4 verify row and every LLD §11 case | 1–4 |
-| D2 | `release` (sign, submit to f+1 builders on distinct operators, poll, union, artifact download, certificate), `status`, `evidence` | D1, C3 (or a test server) | `test_cli` against an `aiohttp` test server: CERTIFIED, BUILD_FAILED, NOT_REPRODUCIBLE, PENDING timeout, corrupted artifact skipped | 4–6.5 |
+| D2 | `release` (sign, submit until f+1 distinct operators accepted, poll, union, artifact download, certificate), `status`, `evidence` | D1, C3 (or a test server) | `test_cli` against an `aiohttp` test server: CERTIFIED, BUILD_FAILED, NOT_REPRODUCIBLE, PENDING timeout, corrupted artifact skipped | 4–6.5 |
 | D3 | `tui.py`: Builders and Releases screens | D2 | Manual: shows a live compose network | 6–8 |
 | D4 | TUI Detail and Evidence screens | D3 | Manual: equivocation proof visible | 8–9.5 |
 | D5 | `docs/DEMO.md` (7 scenes of RFC rev 5 §9.2, commands, expected output, reset, fallbacks) and `examples/ci/{publisher,consumer}.yml` | D2, B1s | A dry run of the demo following only `DEMO.md` | 9–10.5 |

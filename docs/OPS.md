@@ -36,8 +36,13 @@ Then, in **admin PowerShell**:
 ```powershell
 wsl --shutdown
 
-# Allow inbound traffic to WSL (Hyper-V firewall)
-Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+# Hyper-V firewall (in front of WSL): block everything by default, then open only Matrix's two
+# ports. Never set DefaultInboundAction Allow: it would expose every other service running in WSL
+# to the whole hotspot.
+$wsl = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'   # the WSL VM creator id
+Set-NetFirewallHyperVVMSetting -Name $wsl -DefaultInboundAction Block
+New-NetFirewallHyperVRule -Name MatrixDiscovery -DisplayName "Matrix discovery (UDP 7788)" -Direction Inbound -VMCreatorId $wsl -Protocol UDP -LocalPorts 7788 -Action Allow
+New-NetFirewallHyperVRule -Name MatrixApi -DisplayName "Matrix builder API (TCP 7700)" -Direction Inbound -VMCreatorId $wsl -Protocol TCP -LocalPorts 7700 -Action Allow
 
 # Windows Defender Firewall: Matrix ports on the hotspot (private) profile
 New-NetFirewallRule -DisplayName "Matrix discovery (UDP 7788)" -Direction Inbound -Protocol UDP -LocalPort 7788 -Action Allow -Profile Private
@@ -270,7 +275,7 @@ the API off the LAN.
 
 | Symptom | Check |
 |---|---|
-| Founders not appearing | Broadcast blocked: Windows firewall rules and profile `Private` (§2), Hyper-V firewall setting, WSL not mirrored (`ip -4 addr` shows `172.x`), client isolation (§5 broadcast check). |
+| Founders not appearing | Broadcast blocked: Windows firewall rules and profile `Private` (§2), Hyper-V rules `MatrixDiscovery`/`MatrixApi` missing (`Get-NetFirewallHyperVRule -VMCreatorId $wsl`), WSL not mirrored (`ip -4 addr` shows `172.x`), client isolation (§5 broadcast check). |
 | Short codes differ | Different founders seen (compare lists) or different `network.toml` (compare `git rev-parse HEAD`, `sha256sum network.toml`). Restart `matrix up` on all laptops. |
 | Seal refused | Fewer than 4 founders, a duplicate `--name`, or a params mismatch flag. |
 | Ceremony aborted after 5 min | Not every laptop typed `y`, or endorsements do not arrive (UDP 7788). Nothing was written; run `matrix up` again. |

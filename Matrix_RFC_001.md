@@ -700,7 +700,7 @@ matrix tui
 **`matrix release`**
 
 1. Builds the request, signs it with the release-signer key, and computes `request_id` itself.
-2. Submits it to f+1 builders on distinct operators, preferring online ones in genesis order (n = 4: 2 builders), so at least one honest builder forwards it.
+2. Submits it to one builder per operator, online ones first in genesis order, **until f+1 distinct operators have accepted it** (n = 4: 2). At most f operators are faulty, so one of the accepting builders is honest and forwards it. A single acceptance proves nothing: it may come from a faulty builder that drops the request. If fewer than f+1 operators accept, `release` exits 4.
 3. Polls bundles from ≥ f+1 builders, merges them, and runs `verdict()` with its own signed request until the result is not `PENDING` or `--wait` expires.
 4. On `AGREED(h)`: downloads `GET /v1/artifacts/h` from builders whose attestation says `h`, trying the next one until the bytes hash to `h`.
 5. Writes `dist/<output>` and `dist/<output>.matrix.json`, prints the per-builder table, and exits with the code from §6.4.
@@ -1059,7 +1059,7 @@ Rev 5 changes the deployment and automates how the static member list is created
 | tinc full mesh as the default transport | Plain LAN by default; tinc or WireGuard optional (§7.13) | Integrity comes from signatures; plain LAN loses only privacy |
 | One queued request per builder; the rest shed | Persistent SQLite queue, oldest first, nothing shed; catch up on peers' votes before building (§7.6 rule 2) | No honest work is dropped; settled requests cost no build |
 | Build log readable by any caller | Log served to loopback callers only; new `GET /v1/peers` (§7.9) | Logs reveal host details; votes stay public |
-| `release` submits to and polls 3 builders | f+1 builders on distinct operators, preferring online ones in genesis order; addresses from genesis or verified hellos (§7.11) | Follows f; works without addresses in genesis |
+| `release` submits to and polls 3 builders | Submits until f+1 distinct operators accepted (else exit 4), preferring online ones in genesis order; addresses from genesis or verified hellos (§7.11) | Follows f; works without addresses in genesis |
 | Membership changes unspecified | Disconnect ≠ leave; changes only by re-founding; genesis epochs as future work (§8.3, §10) | Stops the shrink-to-quorum attack |
 | Push plus pull sync | Same, stated as push-pull anti-entropy with full fanout; gossip membership and DHTs rejected (D8, §8.3) | Sybil, eclipse and routing poisoning need open or partial views |
 | Demo: 6 scenes, including a whole laptop colluding | 7 scenes, including zero-config founding, an imposter and a laptop that drops off and rejoins; at most one faulty builder at a time (§9.2) | A hacked laptop is one faulty builder; two colluders exceed f |

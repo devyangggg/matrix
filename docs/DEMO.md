@@ -232,9 +232,11 @@ prints `WARNING: some builders disagree with the certified hash (reproducibility
 show it in TUI Detail (`r`, `Enter`: laptop C in red, `DISAGREE`) or with
 `matrix status <request id>`. Copy the result: `cp -r dist/v1.2.1 "$USB"/`.
 
-Laptop C, save the backdoored binary for scene 5 (it really was built and signed):
+Laptop C, save the backdoored binary for scene 5 (it really was built and signed). Move the USB
+stick to laptop C first; `USB` was only set on laptop A in §0.3, so set it here too:
 
 ```bash
+export USB=/mnt/e                                  # the USB stick as seen from WSL on laptop C
 cp ~/.matrix/data/artifacts/<BAD121> "$USB"/evil-hello   # full hash; ls ~/.matrix/data/artifacts/<BAD121[:16]>* finds it
 sha256sum "$USB"/evil-hello                              # = BAD121
 ```
