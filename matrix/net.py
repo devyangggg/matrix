@@ -257,8 +257,10 @@ class PeerClient:
 
     async def get_json(self, node_id: str, path: str) -> Any | None:
         url = self._url(node_id, path)
-        if url is None:
-            return None
+        return None if url is None else await self.get_json_at(url)
+
+    async def get_json_at(self, url: str) -> Any | None:
+        """GET a JSON document from an explicit URL (the CLI's local builder); None on any error."""
         try:
             async with self.session.get(url) as response:
                 if response.status != 200:

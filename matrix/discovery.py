@@ -214,7 +214,7 @@ def udp_socket(port: int | None) -> socket.socket:
         raise
 
 
-class _Datagrams(asyncio.DatagramProtocol):
+class Datagrams(asyncio.DatagramProtocol):
     def __init__(self, on_datagram):
         self.on_datagram = on_datagram
 
@@ -299,7 +299,7 @@ class Discovery:
         loop = asyncio.get_running_loop()
         sock = udp_socket(self.port)  # a bind failure propagates: the node refuses to start
         self.transport, _ = await loop.create_datagram_endpoint(
-            lambda: _Datagrams(self.on_datagram), sock=sock
+            lambda: Datagrams(self.on_datagram), sock=sock
         )
         try:
             next_at = 0.0

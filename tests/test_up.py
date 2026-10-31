@@ -1,0 +1,348 @@
+"""`matrix up`: the founding ceremony over an in-memory bus, and the up command (RFC rev 5 §7.16)."""
+
+import asyncio
+import os
+import stat
+
+import pytest
+from conftest import seed_for
+from nacl.signing import SigningKey
+
+from matrix import cli
+from matrix import discovery as d
+from matrix.canon import canonical_json, loads_strict
+from matrix.crypto import pubkey_hex
+from matrix.genesis import parse_genesis
+
+PARAMS = {
+    "name": "matrix-demo",
+    "allowed_repos": ["https://github.com/org/hello"],
+    "allowed_images": {"go1.23": "golang@sha256:" + "a" * 64},
+    "allowed_goos": ["linux"],
+    "allowed_goarch": ["amd64"],
+    "build_timeout_s": 45,
+    "request_ttl_s": 3600,
+    "sync_interval_s": 5,
+}
+NAMES = ["laptop-a", "laptop-b", "laptop-c", "laptop-d"]
+TOML = (
+    '[network]\nname = "matrix-demo"\nallowed_repos = ["https://github.com/org/hello"]\n'
+    'allowed_images = { "go1.23" = "golang@sha256:' + "a" * 64 + '" }\n'
+    'allowed_goos = ["linux"]\nallowed_goarch = ["amd64"]\n'
+    "build_timeout_s = 45\nrequest_ttl_s = 3600\nsync_interval_s = 5\n"
+)
+
+
+def node_key(name):
+    return SigningKey(seed_for(name))
+
+
+def release_key(name):
+    return SigningKey(seed_for(name + "-rel"))
+
+
+class Hub:
+    """An in-memory hotspot: every send reaches every open bus, like a UDP broadcast."""
+
+    def __init__(self):
+        self.buses = []
+        self.extra: dict[int, list[bytes]] = {}  # bus index -> datagrams only it receives
+
+
+class MemBus:
+    def __init__(self, hub: Hub, index: int):
+        self.hub, self.index, self.cb = hub, index, None
+
+    async def open(self, cb):
+        self.cb = cb
+        self.hub.buses.append(self)
+        for data in self.hub.extra.get(self.index, []):
+            cb(data, ("10.0.0.66", d.DISCOVERY_PORT))
+
+    def send(self, data):
+        loop = asyncio.get_running_loop()
+        for b in list(self.hub.buses):
+            loop.call_soon(b.cb, data, ("10.0.0.1", d.DISCOVERY_PORT))
+
+    def close(self):
+        self.hub.buses.remove(self)
+
+
+def answers(confirm="y"):
+    async def ask(kind):
+        await asyncio.sleep(0.02)
+        return f"{confirm}\n" if kind == "confirm" else "\n"
+
+    return ask
+
+
+async def found(hub, confirms=("y", "y", "y", "y"), timeout=5.0):
+    return await asyncio.gather(
+        *(
+            cli.ceremony(
+                PARAMS,
+                name,
+                node_key(name),
+                release_key(name),
+                MemBus(hub, i),
+                answers(confirms[i]),
+                timeout=timeout,
+                interval=0.01,
+            )
+            for i, name in enumerate(NAMES)
+        )
+    )
+
+
+# --- the ceremony ---------------------------------------------------------------------------
+
+
+async def test_four_laptops_found_the_same_network(capsys):
+    results = await found(Hub())
+    assert all(r is not None for r in results)
+    raws = {canonical_json(r[0]) for r in results}
+    assert len(raws) == 1  # byte-identical genesis on every laptop
+    g = parse_genesis(results[0][0])
+    assert (g.f, g.replicas, g.threshold, len(g.nodes)) == (1, 4, 2, 4)
+    assert all(n.addr is None for n in g.nodes)
+    for raw, endorsements, own in results:
+        assert d.check_endorsements(g, endorsements)  # unanimity
+        assert [e["signer"] for e in endorsements] == sorted(NAMES)
+        assert loads_strict(own) in endorsements
+    out = capsys.readouterr().out
+    assert f"Short code: {d.short_code(g.hash)}" in out
+
+
+async def test_anyone_can_veto():
+    results = await found(Hub(), confirms=("y", "y", "y", "n"), timeout=0.5)
+    assert results == [None, None, None, None]  # laptop-d said no: nobody founds anything
+
+
+async def test_rogue_seen_by_one_laptop_aborts_everyone(capsys):
+    # A fifth device reaches only laptop-d (e.g. it sat closer to it). laptop-d's genesis has five
+    # members and a different short code; the endorsements conflict and every laptop aborts.
+    hub = Hub()
+    hub.extra[3] = [d.make_founder(PARAMS, "rogue", node_key("rogue"), release_key("rogue"))]
+    results = await found(hub, timeout=2.0)
+    assert results == [None, None, None, None]
+    assert "sealed a different genesis" in capsys.readouterr().err
+
+
+async def test_seal_waits_for_four_and_matching_network_toml(capsys):
+    hub = Hub()
+    other = {**PARAMS, "build_timeout_s": 46}
+    hub.extra[0] = [d.make_founder(other, "laptop-x", node_key("x"), release_key("x"))]
+    task = asyncio.create_task(
+        cli.ceremony(
+            PARAMS,
+            "laptop-a",
+            node_key("laptop-a"),
+            release_key("laptop-a"),
+            MemBus(hub, 0),
+            answers(),
+            timeout=0.5,
+            interval=0.01,
+        )
+    )
+    await asyncio.sleep(0.2)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    out = capsys.readouterr().out
+    assert "params MISMATCH" in out and "cannot seal yet: need at least 4 founders" in out
+    assert hub.buses == []  # the bus is closed even when cancelled
+
+
+async def test_placeholder_network_toml_is_refused_at_seal(capsys):
+    placeholder = {**PARAMS, "allowed_repos": ["https://github.com/<org>/matrix-hello"]}
+    hub = Hub()
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                asyncio.wait_for(
+                    cli.ceremony(
+                        placeholder,
+                        n,
+                        node_key(n),
+                        release_key(n),
+                        MemBus(hub, i),
+                        answers(),
+                        interval=0.01,
+                    ),
+                    0.5,
+                )
+                for i, n in enumerate(NAMES)
+            ),
+            return_exceptions=True,
+        ),
+        2,
+    )
+    assert all(isinstance(r, TimeoutError) for r in results)
+    assert "invalid genesis" in capsys.readouterr().out
+
+
+# --- the up command -------------------------------------------------------------------------
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    """A laptop: repo checkout with network.toml as cwd, ~/.matrix in tmp, no real node/UDP."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "network.toml").write_text(TOML)
+    monkeypatch.chdir(repo)
+    h = tmp_path / "home"
+    calls = []
+
+    async def fake_run(args):
+        await asyncio.sleep(0.01)  # a real builder runs for hours: background tasks get to start
+        calls.append(args)
+
+    async def no_broadcast(data, seconds):
+        calls.append(("endorse", data))
+
+    monkeypatch.setattr(cli.node, "run", fake_run)
+    monkeypatch.setattr(cli, "_keep_endorsing", no_broadcast)
+    return h, calls
+
+
+def _keys(h, name="laptop-a"):
+    keys = h / "keys"
+    keys.mkdir(parents=True)
+    cli._write_key(keys / "node.key", seed_for(name).hex())
+    cli._write_key(keys / "release.key", seed_for(name + "-rel").hex())
+
+
+async def _result():
+    return (await found(Hub()))[0]
+
+
+def test_up_founds_writes_files_and_starts_the_node(home, monkeypatch):
+    h, calls = home
+    _keys(h)
+    result = asyncio.run(_result())
+    seen = []
+
+    async def fake_ceremony(params, name, sk, rsk, bus, ask):
+        seen.append((params, name, pubkey_hex(sk), pubkey_hex(rsk)))
+        return result
+
+    monkeypatch.setattr(cli, "ceremony", fake_ceremony)
+    assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 0
+    assert seen == [(PARAMS, "laptop-a", pubkey_hex(node_key("laptop-a")), seen[0][3])]
+    g = parse_genesis(loads_strict((h / "genesis.json").read_bytes()))
+    assert (h / "genesis.sha256").read_text() == g.hash + "\n"
+    assert d.check_endorsements(g, loads_strict((h / "endorsements.json").read_bytes()))
+    run_args = calls[-1]
+    assert (run_args.id, run_args.listen, run_args.no_discovery) == (
+        "laptop-a",
+        "0.0.0.0:7700",
+        False,
+    )
+    assert run_args.data == str(h / "data") and run_args.key == str(h / "keys" / "node.key")
+    assert calls[0][0] == "endorse"  # keeps endorsing for laptops that confirm later
+
+
+def test_up_creates_private_keys_on_first_run(home, monkeypatch):
+    h, _ = home
+
+    async def abort(*a):
+        return None
+
+    monkeypatch.setattr(cli, "ceremony", abort)
+    assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
+    for k in ("node.key", "release.key"):
+        assert (h / "keys" / k).exists()
+        if os.name == "posix":
+            assert stat.S_IMODE((h / "keys" / k).stat().st_mode) == 0o600
+    assert not (h / "genesis.json").exists()  # an aborted ceremony writes nothing
+
+
+def test_up_skips_the_ceremony_once_founded(home, monkeypatch):
+    h, calls = home
+    _keys(h)
+    raw, endorsements, _ = asyncio.run(_result())
+    g = parse_genesis(raw)
+    (h / "genesis.json").write_bytes(canonical_json(raw))
+    (h / "genesis.sha256").write_text(g.hash + "\n")
+    (h / "endorsements.json").write_bytes(canonical_json(endorsements))
+
+    async def must_not_run(*a):
+        raise AssertionError("ceremony ran again")
+
+    monkeypatch.setattr(cli, "ceremony", must_not_run)
+    assert cli.run(["up", "--home", str(h)]) == 0
+    assert calls[-1].id == "laptop-a" and all(c[0] != "endorse" for c in calls[:-1])
+
+
+@pytest.mark.parametrize("tamper", ["pin", "endorsement", "genesis"])
+def test_up_refuses_a_tampered_network(home, tamper):
+    h, calls = home
+    _keys(h)
+    raw, endorsements, _ = asyncio.run(_result())
+    g = parse_genesis(raw)
+    pin = g.hash
+    if tamper == "pin":
+        pin = "0" * 64
+    if tamper == "endorsement":
+        endorsements = endorsements[:3]
+    if tamper == "genesis":
+        raw = {**raw, "sync_interval_s": 6}  # hash no longer matches the pin
+    (h / "genesis.json").write_bytes(canonical_json(raw))
+    (h / "genesis.sha256").write_text(pin + "\n")
+    (h / "endorsements.json").write_bytes(canonical_json(endorsements))
+    assert cli.run(["up", "--home", str(h)]) == 4
+    assert calls == []
+
+
+def test_up_refuses_a_key_that_is_not_in_genesis(home, monkeypatch):
+    h, calls = home
+    _keys(h, name="stranger")
+    result = asyncio.run(_result())
+
+    async def fake_ceremony(*a):
+        return result
+
+    monkeypatch.setattr(cli, "ceremony", fake_ceremony)
+    assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
+    assert [c for c in calls if not isinstance(c, tuple)] == []
+
+
+def test_refound_archives_the_old_network(home, monkeypatch):
+    h, _ = home
+    _keys(h)
+    result = asyncio.run(_result())
+    (h / "genesis.json").write_bytes(canonical_json(result[0]))
+    (h / "genesis.sha256").write_text("old\n")
+    (h / "data").mkdir()
+    (h / "data" / "matrix.db").write_text("old releases")
+
+    async def fake_ceremony(*a):
+        return result
+
+    monkeypatch.setattr(cli, "ceremony", fake_ceremony)
+    assert cli.run(["up", "--home", str(h), "--refound", "--name", "laptop-a"]) == 0
+    code = d.short_code(parse_genesis(result[0]).hash)
+    old = h / f"old-{code}"
+    assert (old / "data" / "matrix.db").read_text() == "old releases"  # nothing deleted
+    assert not (h / "data").exists() and (h / "genesis.json").exists()
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["--fault", "lie"], "require --allow-faults"),
+        (["--name", "bad name!"], "--name must match"),
+        (["--advertise", "laptop:7700"], "--advertise must be"),
+    ],
+)
+def test_up_rejects_bad_flags_before_anything(home, capsys, argv, message):
+    h, calls = home
+    assert cli.run(["up", "--home", str(h), *argv]) == 4
+    assert message in capsys.readouterr().err and calls == [] and not h.exists()
+
+
+def test_up_needs_network_toml(home, monkeypatch, tmp_path, capsys):
+    h, _ = home
+    monkeypatch.chdir(tmp_path)
+    assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
+    assert "network.toml" in capsys.readouterr().err
