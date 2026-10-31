@@ -496,6 +496,10 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L17 | `Engine.on_request` also returns 413 for a body over 4096 bytes (same as `on_attest` over 1024); `net` enforces the limit too |
 | L20 | The development genesis generator refuses to overwrite existing private keys; reruns require a fresh output directory. |
 | L21 | Invalid `since` query values on read-only listing routes use the default cursor 0. |
+| L22 | `build(..., patch=...)` takes a **file path** (the `--patch FILE` of the `inject` fault), applied with `git apply -- <absolute path>` after checkout and before the recipe is read |
+| L23 | `matrix.toml` must be a regular file of at most 4 KiB (checked with `lstat`, so a symlink is never followed) or the outcome is `BAD_RECIPE`; the build output is opened with `O_NOFOLLOW` and a non-regular or oversized file is `ERROR` |
+| L24 | The 512 MiB source-size cap is checked after checkout, not while cloning; the build timeout bounds a hostile clone. Each step keeps at most 1 MiB per output stream in memory and 1 MiB per request in `logs/<rid>.log` across all attempts |
+| L25 | The confirming rerun of `go build` runs only when exit code is 1 and stderr has no environmental marker; `classify_go_build` returns `ERROR` for any other code, including 0. `ARTIFACT_RETENTION_S` lives in `builder.py` (`protocol.py` keeps an unused copy) |
 
 ## 11. Tests
 
