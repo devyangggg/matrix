@@ -48,6 +48,12 @@ def genesis_raw() -> dict:
 
 
 @pytest.fixture
+def genesis_dict() -> dict:
+    """A fresh, mutable raw genesis (for tests that need to break it)."""
+    return genesis_raw()
+
+
+@pytest.fixture
 def genesis():
     from matrix.genesis import parse_genesis
 
