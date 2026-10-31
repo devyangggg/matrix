@@ -1,0 +1,281 @@
+# Matrix operations runbook
+
+Per-laptop setup and the founding ceremony for the rev 5 network: **4 laptops on one LAN (a phone
+hotspot), one builder per laptop**, n = 4, f = 1, threshold T = 2. Each laptop is its own
+operator. Do §1 to §5 once per laptop, then found the network together (§6). The demo itself is in
+[DEMO.md](DEMO.md).
+
+> `matrix up`, discovery and `/v1/peers` are specified in RFC rev 5 but not implemented yet
+> (backlog R1 to R5). Screen text below is indicative.
+
+## 1. What every laptop needs
+
+| Item | Value |
+|---|---|
+| OS | Linux, or Windows 11 with **WSL2** (run Python, Docker and `matrix` from WSL2, never PowerShell) |
+| Python | 3.11+ |
+| Docker | Docker Desktop with WSL integration, or Docker Engine (inside WSL2 or native Linux) |
+| Inbound ports | **UDP 7788** (discovery hellos and ceremony), **TCP 7700** (builder API) |
+| Matrix | the **same commit** of this repo on every laptop (same `network.toml`) |
+| Go image | the pinned `golang@sha256:<digest>` (AGENTS H4), pre-pulled |
+
+## 2. Windows: WSL2 mirrored networking and firewall
+
+Mirrored networking gives WSL2 the laptop's own Wi-Fi address, so broadcasts and inbound
+connections reach the builder. Needs Windows 11 22H2+ and WSL 2.0+ (`wsl --version`).
+
+Create or edit `%UserProfile%\.wslconfig` (keep any other lines you already have):
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Then, in **admin PowerShell**:
+
+```powershell
+wsl --shutdown
+
+# Allow inbound traffic to WSL (Hyper-V firewall)
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+
+# Windows Defender Firewall: Matrix ports on the hotspot (private) profile
+New-NetFirewallRule -DisplayName "Matrix discovery (UDP 7788)" -Direction Inbound -Protocol UDP -LocalPort 7788 -Action Allow -Profile Private
+New-NetFirewallRule -DisplayName "Matrix builder API (TCP 7700)" -Direction Inbound -Protocol TCP -LocalPort 7700 -Action Allow -Profile Private
+# Lets the other laptops ping this one for the §5 check (Windows drops ping by default)
+New-NetFirewallRule -DisplayName "Matrix ping check (ICMPv4)" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Allow -Profile Private
+
+# After joining the hotspot: it must be Private, or the rules above do not apply
+Get-NetConnectionProfile
+Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Private
+```
+
+Check inside WSL: `ip -4 addr` shows the same Wi-Fi address as `ipconfig` on Windows. If WSL shows
+a `172.x` NAT address instead, mirrored mode is not active (check the file name and run
+`wsl --shutdown` again).
+
+## 3. Linux laptops
+
+No WSL step. If a firewall is active, open the same ports:
+
+```bash
+sudo ufw allow 7788/udp && sudo ufw allow 7700/tcp                      # ufw
+sudo firewall-cmd --add-port=7788/udp --add-port=7700/tcp               # firewalld (until reboot)
+```
+
+## 4. Docker, the Go image and the Matrix checkout
+
+Docker: either Docker Desktop with **Settings > Resources > WSL integration** enabled for your
+distro, or Docker Engine installed inside WSL2 (or native Linux) with your user in the `docker`
+group. Then, in WSL2:
+
+```bash
+docker run --rm hello-world                                    # works without sudo
+docker pull --platform linux/amd64 golang@sha256:<digest>      # H4; do this before the venue
+docker image ls --digests golang                               # the digest is listed
+```
+
+Matrix, in the WSL2 home directory (not under `/mnt/c`: key file modes and speed):
+
+```bash
+git clone https://github.com/ChaoticNebula5/Matrix ~/Matrix && cd ~/Matrix
+git checkout <demo commit>                                     # the same on all four laptops
+python3.11 -m venv .venv && . .venv/bin/activate
+pip install -e .
+git rev-parse HEAD && sha256sum network.toml                   # compare on all four laptops
+```
+
+`network.toml` holds the network parameters every founder must agree on. It is checked into the
+repo, so the same checkout means the same values. For the demo it looks like this (fill in H3 and
+H4 before founding, commit, and pull on every laptop):
+
+```toml
+[network]
+name = "matrix-demo"
+allowed_repos = ["https://github.com/<org>/matrix-hello"]
+allowed_images = { "go1.23" = "golang@sha256:<digest>" }
+allowed_goos = ["linux"]
+allowed_goarch = ["amd64"]
+build_timeout_s = 45
+request_ttl_s = 3600
+sync_interval_s = 5
+```
+
+## 5. Hotspot check (before every venue)
+
+Some hotspots isolate clients from each other; Matrix then cannot work. An iPhone hotspot uses a
+/28 subnet (`172.20.10.0/28`: the phone plus up to 13 clients, enough for 4 laptops). Join the
+hotspot on all four laptops, then in WSL2:
+
+```bash
+ip -4 addr                                  # note this laptop's address
+ping -c 3 <other laptop's address>          # from every laptop to every other one
+```
+
+Broadcast check (UDP 7788; run before `matrix up`, while the port is free). Listener on one
+laptop, sender on another:
+
+```bash
+python3 -c "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('',7788));print(s.recvfrom(512))"
+python3 -c "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1);s.sendto(b'hi',('255.255.255.255',7788))"
+```
+
+The listener prints `(b'hi', ('<sender address>', <port>))`. If ping or the broadcast fails although
+both laptops have an address on the hotspot, the hotspot isolates clients (or a firewall blocks):
+fix the firewall (§2, §3), turn off any "AP isolation" setting on the phone, or switch to the
+backup (a second phone's hotspot or a travel router, checked the same way in advance).
+
+## 6. Founding ceremony: `matrix up`
+
+One command per laptop, no files to edit, no authority. All four laptops, at the same time:
+
+```bash
+cd ~/Matrix && . .venv/bin/activate
+matrix up --name laptop-a                   # laptop-b, laptop-c, laptop-d on the others
+```
+
+`--name` defaults to the hostname (lowercased, invalid characters replaced by `-`, at most 24
+characters); it must match `[A-Za-z0-9_-]{1,24}` and be unique in the network.
+
+What happens:
+
+1. **Keys.** `~/.matrix/keys/node.key` and `~/.matrix/keys/release.key` are generated if absent
+   (64 hex seed, mode 0600). They never leave the laptop.
+2. **Founders.** Every laptop announces itself on UDP 7788 every 2 s (name, public keys, hash of
+   the `network.toml` values, self-signed). The screen lists founders as they appear, with a short
+   key fingerprint, and flags any founder whose parameters differ from ours:
+
+   ```
+   founding network matrix-demo (network.toml params a41c…)
+     laptop-a   9f3e 21c0   (you)
+     laptop-b   0c7d 88a1
+     laptop-c   e2b4 5f19
+     laptop-d   41aa 0d3e
+   4 founders, params match. Press Enter to seal.
+   ```
+
+3. **Seal.** When exactly the expected laptops are listed, press **Enter** on each laptop. Seal is
+   refused with fewer than 4 founders, duplicate names or any parameter mismatch. Every laptop
+   then builds the same genesis (nodes and release signers sorted by public key, no addresses,
+   f = n // 4, replicas = n, threshold = f + 1) and shows its **short code**, the first 16 hex
+   characters of the genesis hash:
+
+   ```
+   short code 3F2A-9C1D-77E0-41B8
+   Read it aloud. Same on every laptop? [y/N]
+   ```
+
+4. **Compare.** One person reads the code aloud; every user checks their own screen and types `y`
+   only if it matches. This human comparison is the trust root (like Bluetooth pairing or Signal
+   safety numbers).
+5. **Endorse.** Each laptop then broadcasts a signed endorsement of the genesis hash. Genesis
+   becomes active only with a valid endorsement from **every** node in it: anyone can veto. After 5
+   minutes without all endorsements the ceremony aborts and nothing is written.
+6. **Run.** On success it writes `~/.matrix/genesis.json`, `~/.matrix/genesis.sha256` and
+   `~/.matrix/endorsements.json`, then starts the node in the same process: listen
+   `0.0.0.0:7700`, data `~/.matrix/data`, discovery on UDP 7788.
+
+On a mismatch, **never type `y`**:
+
+| You see | Cause | Do this |
+|---|---|---|
+| An extra or unknown founder row | A rogue device or a stale `matrix up` on the hotspot | Do not seal. Find and stop it; Ctrl-C and restart `matrix up` on all laptops. |
+| A founder flagged for params | Its `network.toml` differs | Compare `git rev-parse HEAD` and `sha256sum network.toml`; check out the same commit; restart. |
+| Short codes differ | Laptops saw different founders, or different `network.toml` | Compare the founder lists row by row; fix; restart `matrix up` on all laptops. |
+| A laptop missing from the list | Its announcements do not arrive | §12 "Founders not appearing". |
+
+Later runs of `matrix up` find `~/.matrix/genesis.json` and skip the ceremony.
+
+## 7. Files under `~/.matrix/`
+
+| Path | What | Share? |
+|---|---|---|
+| `keys/node.key` | builder signing key (64 hex seed, 0600) | **Never.** It stays on this laptop. |
+| `keys/release.key` | this laptop's release-signer key (`<name>-rel` in genesis) | **Never.** |
+| `genesis.json` | the network constitution: members, public keys, parameters | Public |
+| `genesis.sha256` | the genesis hash, the pin | Public, through a trusted channel (§9) |
+| `endorsements.json` | every founder's signed endorsement of the genesis hash | Public |
+| `data/matrix.db` | SQLite: requests, attestations, build queue, evidence | Local |
+| `data/logs/`, `data/artifacts/`, `data/work/` | build logs, built binaries (kept 24 h), build scratch | Local; logs are served to loopback only |
+
+Private keys never leave the laptop that generated them; only public keys go into genesis. A lost
+key means that laptop can no longer vote or release; re-found (§10).
+
+## 8. Running the node
+
+```bash
+matrix up                                   # start (no ceremony once genesis exists); Ctrl-C stops
+curl -s http://127.0.0.1:7700/v1/health     # genesis hash and node id
+curl -s http://127.0.0.1:7700/v1/peers      # latest verified hello per member (untrusted, re-verified by clients)
+```
+
+- A node is **online** while its last hello is under 15 s old; hellos go out every 5 s and on
+  any address change. The address book is in memory and refills within 5 s after a restart.
+- Disconnect is not leave: an offline laptop stays a member and catches up when it is back (pull
+  sync, re-sending its own stored votes; it never rebuilds a voted or settled request).
+- `--advertise HOST:PORT` overrides the advertised address (default: this laptop's LAN address
+  with port 7700).
+- Demo faults: `matrix up --allow-faults --fault MODE [--patch FILE] [--hash HEX]`. Inert without
+  `--allow-faults`. With f = 1, never more than one faulty laptop at a time.
+- `release`, `status`, `evidence` and `tui` find the builders through the local node
+  (`--node`, `$MATRIX_NODE`, default `127.0.0.1:7700`), so keep `matrix up` running on the
+  publisher's laptop.
+
+## 9. Publishing the genesis pin
+
+Consumers pin the genesis hash obtained through a trusted channel, plus a copy of `genesis.json`:
+
+```bash
+cat ~/.matrix/genesis.sha256                # 64 hex; its first 16 characters are the short code
+```
+
+Publish the hash in the project README (in the source repository, never only on the release
+page: RFC A5), and `genesis.json` (and
+`endorsements.json`) next to it. Consumers check them into their own repo, as in
+[examples/ci/consumer.yml](../examples/ci/consumer.yml) (`matrix/genesis.json`,
+`matrix/genesis.sha256`). `matrix verify` refuses a genesis file that does not match the pin.
+
+## 10. Re-founding
+
+Membership is fixed at founding. Adding, removing or replacing a laptop, or changing
+`network.toml`, means founding a new network:
+
+```bash
+b=~/matrix-network-$(date +%Y%m%d-%H%M%S) && mkdir -p "$b"
+cp ~/.matrix/genesis.json ~/.matrix/genesis.sha256 ~/.matrix/endorsements.json "$b"/   # keep the old pin
+mv ~/.matrix/data "$b"/                     # request IDs do not depend on genesis: start a fresh database
+matrix up --refound --name laptop-a         # the ceremony again, on every laptop of the new network
+```
+
+The new network has a new genesis hash. Certificates issued under the old one still verify
+against the old pin, so consumers keep the old `genesis.json` and hash for old releases and pin
+the new ones for new releases.
+
+## 11. Optional: tinc or WireGuard
+
+Plain LAN is the default. It loses only **confidentiality**: anyone on the hotspot can see which
+releases are built and their results. Integrity comes from the signatures, so safety is the same.
+For privacy, run tinc ([RFC §7.13](../Matrix_RFC_001.md)) or WireGuard between the laptops and
+advertise the tunnel address:
+
+```bash
+matrix up --advertise 10.77.0.1:7700        # this laptop's tunnel address
+```
+
+Hellos are still broadcast on the LAN (they carry only a member id, an address and a signature);
+builder traffic then goes over the tunnel. Restrict TCP 7700 to the tunnel interface if you want
+the API off the LAN.
+
+## 12. Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Founders not appearing | Broadcast blocked: Windows firewall rules and profile `Private` (§2), Hyper-V firewall setting, WSL not mirrored (`ip -4 addr` shows `172.x`), client isolation (§5 broadcast check). |
+| Short codes differ | Different founders seen (compare lists) or different `network.toml` (compare `git rev-parse HEAD`, `sha256sum network.toml`). Restart `matrix up` on all laptops. |
+| Seal refused | Fewer than 4 founders, a duplicate `--name`, or a params mismatch flag. |
+| Ceremony aborted after 5 min | Not every laptop typed `y`, or endorsements do not arrive (UDP 7788). Nothing was written; run `matrix up` again. |
+| A builder offline in the TUI | Its hellos do not arrive: firewall (UDP 7788), Wi-Fi, or its node stopped. `curl -s http://127.0.0.1:7700/v1/peers` on another laptop shows its last hello. |
+| Online but builds never arrive | TCP 7700 blocked inbound on that laptop (§2, §3), or a wrong `--advertise`. |
+| `matrix: no builder accepted the request` | The local node is not running, or no peer is reachable on TCP 7700. |
+| Build `ERROR` on one laptop | Docker not reachable from WSL (`docker ps`), image not pre-pulled, disk full, or no internet for `git clone` / the Go module proxy. Environmental errors abstain, they never vote. |
+| `evidence --since` window looks wrong | Each builder filters on its own clock; fix large clock skew between laptops. |

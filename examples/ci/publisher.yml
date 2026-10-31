@@ -1,13 +1,18 @@
 # Publisher CI (RFC §7.11): on a tag push, get the release certified by the Matrix network and
 # upload the binary and its certificate. Copy to .github/workflows/ in the Go project's repo.
 #
-# The runner must be on the builder mesh (tinc), so this is a self-hosted runner. It holds a
-# release-signer key whose public key is in genesis. Only exit code 0 means CERTIFIED; anything
-# else fails the job, and nothing is uploaded (fail closed).
+# The runner must be on the same LAN as the builders, so this is a self-hosted runner. Rev 5
+# release signers are created by the founding ceremony (`matrix up`): each founding laptop gets
+# `<name>-rel` with its key in ~/.matrix/keys/release.key, and a dedicated CI signer cannot be
+# added without re-founding. So run this runner on one of the founding laptops, as the user who
+# ran `matrix up`, with that node running: it uses ~/.matrix/genesis.json and the laptop's own
+# release key in place (private keys never leave the laptop, so never put one in a secret).
+# Only exit code 0 means CERTIFIED; anything else fails the job, and nothing is uploaded (fail
+# closed).
 #
 # Setup:
-#   secrets.MATRIX_RELEASE_KEY  the release signer's key file content (64 hex)
-#   genesis.json                checked into this repo next to the workflow, or on the runner
+#   ~/.matrix/genesis.json, ~/.matrix/keys/release.key  on the runner, from the ceremony
+#   `matrix up` running on the runner's laptop (release finds the builders via 127.0.0.1:7700)
 #   vars.MATRIX_VERIFIER_COMMIT  reviewed, immutable 40-character lowercase Matrix source
 #                                commit SHA (required; installation fails without it)
 name: matrix-release
@@ -21,7 +26,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: [self-hosted, matrix-mesh]
+    runs-on: [self-hosted, matrix-founder]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -34,18 +39,11 @@ jobs:
           pip install "git+https://github.com/ChaoticNebula5/Matrix@${MATRIX_VERIFIER_COMMIT}"
 
       - name: Certify
-        env:
-          MATRIX_GENESIS: ${{ github.workspace }}/genesis.json
-          MATRIX_RELEASE_KEY: ${{ secrets.MATRIX_RELEASE_KEY }}
         run: |
-          umask 077
-          key="$RUNNER_TEMP/release.key"
-          printf '%s\n' "$MATRIX_RELEASE_KEY" > "$key"
-          trap 'rm -f "$key"' EXIT
           matrix release \
             --repo "https://github.com/${GITHUB_REPOSITORY}" \
             --tag "$GITHUB_REF_NAME" --commit "$(git rev-parse HEAD)" \
-            --key "$key" --wait 600 --out dist/ --output hello
+            --key "$HOME/.matrix/keys/release.key" --wait 600 --out dist/ --output hello
 
       - name: Upload binary and certificate
         env:
