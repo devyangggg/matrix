@@ -264,6 +264,8 @@ Dependencies: `pynacl`, `aiohttp`, `textual`. Host prerequisites: Docker, git an
 }
 ```
 
+- **The `nodes` list above is abbreviated.** A real genesis lists all n = 8 nodes (`node3`–`node8` on laptops B–D, `10.77.0.2`–`10.77.0.4`, ports 7700 and 7701). With only two entries it fails the `replicas ≤ n` startup check below.
+
 - The image digest is the **single-platform** manifest, not the multi-arch manifest list. Containers run with `--platform linux/amd64`, so an arm64 laptop emulates. Otherwise laptops could pull different toolchain binaries.
 - The goos/goarch allowlists live in genesis, so every node applies the same validation rules. Differing code-embedded lists would make nodes disagree on request validity.
 
@@ -386,7 +388,7 @@ stateDiagram-v2
     OBSERVING --> [*]: settled
 ```
 
-A request is **settled** locally when `verdict()` over the local store is anything but `PENDING`, or when it is older than 1 hour. Settled requests stop being ingested and pulled.
+A request is **settled** locally when `verdict()` over the local store is anything but `PENDING`, or when it is older than 1 hour. Settlement stops **new build work** only: no admission, no build retries. A node that has already committed still reveals (rule 6). Until the request's **retention window** closes at `t0 + 1 hour`, the node keeps accepting pushed envelopes, pulling the request's bundle and re-running evidence detection, so late commits and reveals still produce `EQUIVOCATION`, `BAD_OPEN` and `LATE_COMMIT` evidence. After the retention window the request is no longer ingested or pulled; stored envelopes and evidence are kept.
 
 Rules for a node `X` handling request `q`, where `t0` is X's local receipt time of `q`:
 
@@ -396,6 +398,7 @@ Rules for a node `X` handling request `q`, where `t0` is X's local receipt time 
    - `hash`: `result` is the binary's SHA-256.
    - `FAILED`: a deterministic failure only (§7.10). `result` is `"FAILED"`.
    - `ERROR`: an environmental failure. Retry up to 2 times while `now + BUILD_TIMEOUT < t0 + COMMIT_WINDOW`. If it still fails, mark `MISSED`; **never commit or reveal**.
+   - `BAD_REF`: the source reference is invalid (commit missing, tag missing, or tag not resolving to `commit`). Do not retry; mark `MISSED` and record the reason in `my_builds.error`; **never commit or reveal**.
 4. **Commit.** If `now < t0 + COMMIT_WINDOW`, generate a nonce, store `(result, nonce)` locally, and broadcast the commit. Otherwise mark the request `MISSED`.
 5. **Store commits** from selected signers whenever they arrive. A commit that arrives after X has revealed, or after `t0 + COMMIT_WINDOW`, is stored with `note = 'late'`. It is **not** dropped.
 6. **Reveal** when X has committed and either it holds commits from all R selected nodes, or `now ≥ t0 + COMMIT_WINDOW + REVEAL_GRACE`.
@@ -520,11 +523,11 @@ Limits: `POST /v1/requests` body ≤ 4 KiB; `POST /v1/messages` body ≤ 2 KiB; 
 **Pull sync**, every `SYNC_INTERVAL`, for each peer:
 
 1. `GET /v1/requests?since=last_sync - 60` and fetch unknown requests.
-2. For each request that is not settled locally, `GET /bundle` and process every envelope through the normal validation path.
+2. For each request still inside its retention window (§7.6), settled or not, `GET /bundle` and process every envelope through the normal validation path.
 
 ### 7.10 Builder
 
-Each build runs in a work directory `work/<request_id>/{src,out,gomod}`. Every Docker command uses the common flags `--platform linux/amd64 --user "$UID:$GID" --cap-drop ALL --security-opt no-new-privileges --memory 4g --cpus 2 --pids-limit 512 --name mx-<rid8>-<step> -e HOME=/tmp -e GOTOOLCHAIN=local -e GOFLAGS=-mod=readonly`.
+Each build runs in a work directory `work/<request_id>/{src,out,gomod}`. Every Docker command uses the common flags `--platform linux/amd64 --user "$UID:$GID" --cap-drop ALL --security-opt no-new-privileges --memory 4g --cpus 2 --pids-limit 512 --name mx-<node_id>-<rid8>-<step> -e HOME=/tmp -e GOTOOLCHAIN=local -e GOFLAGS=-mod=readonly`.
 
 ```bash
 # 1. Source (host; time- and size-capped, no submodules, no prompts)
@@ -557,17 +560,20 @@ Outcome classification:
 | Situation | Outcome |
 |---|---|
 | Step 3 `go build` exits 1 (compile or link error) | `FAILED` |
-| Clone succeeded but `commit` is missing, or `tag` is missing or does not resolve to `commit` | `FAILED` |
+| Clone succeeded but `commit` is missing, or `tag` is missing or does not resolve to `commit` | `BAD_REF`: abstain, no retry (§7.6 rule 3) |
 | Clone or fetch network error, proxy error, **any step 2 failure**, timeout, out-of-memory (137), Docker error (125 to 127), disk full | `ERROR`: abstain, retry (§7.6 rule 3) |
 | Success | the hash |
+
+`FAILED` is reserved for deterministic build failures of a valid source reference. An invalid or inconsistent reference is an input problem, not a build result, so it never becomes a vote: the verdict stays `PENDING` (exit 3, fail closed) and the reason is visible in the node's build log and `my_builds.error`.
 
 Step 2 failures are always `ERROR`, so a `go.sum` mismatch becomes `PENDING`, not `BUILD_FAILED`. That fails closed and avoids guessing whether a download failure was deterministic.
 
 - Commands run via `asyncio.create_subprocess_exec` with argument lists, never shell strings.
-- Stdout and stderr go to `log_path`, capped at 1 MiB. Clone is capped in time and size.
-- On timeout, the node runs `docker kill` on the named container; the outcome is `ERROR`.
+- Docker container names include the node ID, so two nodes on one laptop can run the same step of the same request concurrently without a name conflict.
+- Stdout and stderr go to `log_path` (`logs/<request_id>.log`, outside `work/`), capped at 1 MiB. Clone is capped in time and size.
+- On timeout, the node terminates whatever step is running. Host commands (`git`) are started in their own process group (`start_new_session=True`) and the whole group is sent SIGTERM, then SIGKILL after 5 s (on Windows hosts, `proc.kill()`). Docker steps additionally get `docker kill` on the named container, because killing the `docker run` client does not stop the container. The outcome is `ERROR`.
 - Before the hackathon, pre-pull the pinned image on every laptop.
-- Containers run as the host user, so `rm -rf work/<id>` after hashing always works.
+- `work/<id>` is removed in a `finally` block after **every** terminal outcome of an attempt: hash, `FAILED`, `BAD_REF`, `ERROR`, timeout or cancellation. Each retry starts from an empty work directory. Only the capped log is kept. Containers run as the host user, so `rm -rf work/<id>` always works.
 - A build that fails for environmental reasons never reveals `FAILED`; this is what keeps honest flakes from becoming votes.
 
 ### 7.11 Client CLI
@@ -630,7 +636,7 @@ Subnet = 10.77.0.1/32
 - `tinc-up` assigns `10.77.0.x/24` to the interface.
 - Every laptop uses `ConnectTo` toward every other laptop for a direct full mesh, so no traffic is relayed through a peer.
 - Node API ports are reachable only on the tinc interface.
-- Venue Wi-Fi often isolates clients from each other. Use a travel router or phone tethering. If tinc is not up on all laptops by hour 2, fall back to plain LAN or WireGuard; nothing above the transport changes.
+- Venue Wi-Fi often isolates clients from each other. Use a travel router or phone tethering. If tinc is not up on all laptops by hour 2, fall back to plain LAN or WireGuard; nothing above the transport changes. tinc and WireGuard encrypt the transport; **plain LAN does not**. On plain LAN, anyone on the network can read requests, envelopes and bundles (which repositories are being verified, and the results). Signatures still protect integrity and authenticity, so safety is unaffected; only confidentiality is lost.
 
 ### 7.14 Fault modes (demo only)
 
@@ -677,7 +683,7 @@ Safety holds with ≤ f malicious nodes. Liveness additionally needs enough hone
 | Nondeterministic build | `NOT_REPRODUCIBLE`. The maintainer must fix the recipe. |
 | Malformed or hostile bundle served to the client | Ignored by the parser; the client uses the union of ≥ 3 nodes. |
 | Duplicate request | Deduplicated by content ID. |
-| Disk fills up | Delete `work/<id>` after hashing; keep only logs. |
+| Disk fills up | Delete `work/<id>` after every terminal build outcome, success or not (§7.10), and remove any leftover `work/*` at startup; keep only capped logs. |
 
 ## 9. Testing, build plan and cut list
 
