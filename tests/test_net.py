@@ -398,3 +398,21 @@ async def test_peers_route_serves_the_book(tmp_path, genesis, keys, clock):
             assert body == {"now": 100.0, "hellos": expected}
         finally:
             await client.close()
+
+
+@pytest.mark.parametrize(
+    "advertise", ["laptop-a:7700", "10.0.0.1", "10.0.0.300:7700", "[::1]:7700"]
+)
+def test_node_rejects_a_bad_advertise_address(tmp_path, capsys, advertise):
+    argv = ["--genesis", "missing", "--id", "builder1", "--key", "missing"]
+    argv += ["--listen", "0.0.0.0:7700", "--data", str(tmp_path), "--advertise", advertise]
+    assert main(argv) == 2
+    assert "--advertise must be <IPv4>:<port>" in capsys.readouterr().err
+
+
+def test_node_discovery_flags_parse():
+    base = ["--genesis", "g", "--id", "b", "--key", "k", "--listen", "0.0.0.0:7700", "--data", "d"]
+    args = _parser().parse_args(base)
+    assert args.advertise is None and args.no_discovery is False
+    args = _parser().parse_args([*base, "--advertise", "10.77.0.1:7700", "--no-discovery"])
+    assert args.advertise == "10.77.0.1:7700" and args.no_discovery is True

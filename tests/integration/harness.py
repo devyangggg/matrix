@@ -72,6 +72,7 @@ class Network:
                     f"127.0.0.1:{7699 + index}",
                     "--data",
                     str(self.directory / node_id),
+                    "--no-discovery",  # static dev addrs; tests never broadcast onto the LAN
                 ]
                 if node_id in self.faults:
                     command += ["--allow-faults", *self.faults[node_id]]
