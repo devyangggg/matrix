@@ -941,3 +941,7 @@ def run(argv: list[str] | None = None) -> int:
 
 def main() -> None:
     sys.exit(run())
+
+
+if __name__ == "__main__":
+    main()
