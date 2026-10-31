@@ -19,3 +19,6 @@ __pycache__/
 
 # uv lockfile (CI uses pip)
 uv.lock
+
+# macOS
+.DS_Store
