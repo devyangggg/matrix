@@ -1,13 +1,14 @@
 # Network parameters for `matrix up` (RFC rev 5 §7.16, LLD §4.2). Every founding laptop must use
 # the same checkout of this file: founders with a different file are flagged and the seal is refused.
 #
-# Fill in the two placeholders before the ceremony (AGENTS §4: H3 repo URL, H4 linux/amd64 digest
-# from `docker buildx imagetools inspect golang:1.23`). Until then the seal is refused on purpose
-# ("invalid genesis"), so a network can never be founded with a made-up digest.
+# allowed_repos: the public sample repo (AGENTS §4 H3, §10).
+# allowed_images: golang:1.23 (1.23.12-bookworm), the linux/amd64 manifest digest from
+# `docker buildx imagetools inspect golang:1.23` (AGENTS §4 H4). Pull it before the ceremony:
+#   docker pull --platform linux/amd64 golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
 [network]
 name = "matrix-demo"
-allowed_repos = ["https://github.com/<org>/matrix-hello"]
-allowed_images = { "go1.23" = "golang@sha256:<linux/amd64 digest>" }
+allowed_repos = ["https://github.com/ChaoticNebula5/matrix-hello"]
+allowed_images = { "go1.23" = "golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689" }
 allowed_goos = ["linux"]
 allowed_goarch = ["amd64"]
 build_timeout_s = 45
