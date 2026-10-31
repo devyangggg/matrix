@@ -5,16 +5,18 @@ hotspot), one builder per laptop**, n = 4, f = 1, threshold T = 2. Each laptop i
 operator. Do §1 to §5 once per laptop, then found the network together (§6). The demo itself is in
 [DEMO.md](DEMO.md).
 
-> `matrix up`, discovery and `/v1/peers` are specified in RFC rev 5 but not implemented yet
-> (backlog R1 to R5). Screen text below is indicative.
+> Run `matrix` itself natively on every laptop (WSL2 on Windows, directly on Linux and macOS),
+> never in a container: on Docker Desktop a container's network is Docker's own VM
+> (`192.168.65.x`), so its broadcasts never reach the hotspot and its advertised address is
+> unreachable. Docker only runs the sandboxed Go builds. Screen text below is approximate.
 
 ## 1. What every laptop needs
 
 | Item | Value |
 |---|---|
-| OS | Linux, or Windows 11 with **WSL2** (run Python, Docker and `matrix` from WSL2, never PowerShell) |
+| OS | Linux (e.g. Debian), macOS (Apple Silicon too, §3.1), or Windows 11 with **WSL2** (run Python, Docker and `matrix` from WSL2, never PowerShell) |
 | Python | 3.11+ |
-| Docker | Docker Desktop with WSL integration, or Docker Engine (inside WSL2 or native Linux) |
+| Docker | Docker Desktop (Windows with WSL integration, macOS), or Docker Engine (Linux). It only runs the builds |
 | Inbound ports | **UDP 7788** (discovery hellos and ceremony), **TCP 7700** (builder API) |
 | Matrix | the **same commit** of this repo on every laptop (same `network.toml`) |
 | Go image | the pinned `golang@sha256:<digest>` (AGENTS H4), pre-pulled |
@@ -68,15 +70,33 @@ sudo ufw allow 7788/udp && sudo ufw allow 7700/tcp                      # ufw
 sudo firewall-cmd --add-port=7788/udp --add-port=7700/tcp               # firewalld (until reboot)
 ```
 
+Docker Engine with your user in the `docker` group (Debian: `sudo apt install docker.io`, then
+`sudo usermod -aG docker $USER` and log in again).
+
+### 3.1 macOS laptops (Apple Silicon included)
+
+No WSL step; run everything in Terminal.
+
+- Python 3.11+: `brew install python@3.11`, then `python3.11 -m venv` as in §4.
+- Docker Desktop, with **Settings > General > Use Rosetta for x86_64/amd64 emulation on Apple
+  Silicon** on. The pinned Go image is `linux/amd64`, so on Apple Silicon every build runs
+  emulated: slower, but it must give the same hash. Check both in the rehearsal: the Mac's
+  `v1.2.0` vote must equal `H120` ([DEMO.md §0.2](DEMO.md)), and its build time must fit
+  `build_timeout_s` in `network.toml` (raise it there, in the shared commit, before founding).
+- Firewall: the first `matrix up` triggers "Accept incoming network connections?" for Python:
+  click **Allow** (or turn the firewall off for the demo in System Settings > Network > Firewall).
+- Differences in the commands: this laptop's address is `ipconfig getifaddr en0` (not
+  `ip -4 addr`), `sha256sum` is `shasum -a 256`, and a USB stick is under `/Volumes/<name>`.
+
 ## 4. Docker, the Go image and the Matrix checkout
 
-Docker: either Docker Desktop with **Settings > Resources > WSL integration** enabled for your
-distro, or Docker Engine installed inside WSL2 (or native Linux) with your user in the `docker`
-group. Then, in WSL2:
+Docker only runs the builds; `matrix` itself runs natively (the note at the top). Either Docker
+Desktop (on Windows with **Settings > Resources > WSL integration** enabled for your distro), or
+Docker Engine on Linux, with your user in the `docker` group. Then, in WSL2 or a terminal:
 
 ```bash
 docker run --rm hello-world                                    # works without sudo
-docker pull --platform linux/amd64 golang@sha256:<digest>      # H4; do this before the venue
+docker pull --platform linux/amd64 golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689   # H4; before the venue
 docker image ls --digests golang                               # the digest is listed
 ```
 
@@ -91,14 +111,14 @@ git rev-parse HEAD && sha256sum network.toml                   # compare on all 
 ```
 
 `network.toml` holds the network parameters every founder must agree on. It is checked into the
-repo, so the same checkout means the same values. For the demo it looks like this (fill in H3 and
-H4 before founding, commit, and pull on every laptop):
+repo, so the same checkout means the same values. For the demo it is (H3 and H4 filled in; pull the
+same commit on every laptop):
 
 ```toml
 [network]
 name = "matrix-demo"
-allowed_repos = ["https://github.com/<org>/matrix-hello"]
-allowed_images = { "go1.23" = "golang@sha256:<digest>" }
+allowed_repos = ["https://github.com/ChaoticNebula5/matrix-hello"]
+allowed_images = { "go1.23" = "golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689" }
 allowed_goos = ["linux"]
 allowed_goarch = ["amd64"]
 build_timeout_s = 45

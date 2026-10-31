@@ -3,14 +3,23 @@
 #
 #   cp .env.example .env            # then edit it; COMPOSE_PROFILES there must match --nodes
 #   docker pull --platform linux/amd64 golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
-#   python scripts/dev_genesis.py --out dev --addrs compose --profile demo --nodes 8 #       --repo https://github.com/ChaoticNebula5/matrix-hello #       --image golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
+#   python scripts/dev_genesis.py --out dev --addrs compose --profile demo --nodes 8 \
+#       --repo https://github.com/ChaoticNebula5/matrix-hello \
+#       --image golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
 #   docker compose up -d --build    # builder1..8 with COMPOSE_PROFILES=eight, builder1..4 without
-#   docker compose run --rm cli release --repo https://github.com/ChaoticNebula5/matrix-hello #       --tag v1.2.0 --commit fb6881c6e2432fa107ef809af109a9a1344ed2c0 #       --key /etc/matrix/keys/release.key --wait 600 --out dist/
+#   docker compose run --rm cli release --repo https://github.com/ChaoticNebula5/matrix-hello \
+#       --tag v1.2.0 --commit fb6881c6e2432fa107ef809af109a9a1344ed2c0 \
+#       --key /etc/matrix/keys/release.key --wait 600 --out dist/
 #   docker compose run --rm cli tui
+#
+# Not for the laptop demo: there every laptop runs `matrix up` natively (docs/OPS.md, DEMO.md) and
+# Docker only runs the builds. A containerized node cannot do discovery on Docker Desktop, whose
+# network is its own VM (192.168.65.x), not the laptop's hotspot address.
 #
 # Build logs are served to loopback callers only (RFC D29), so neither the host port nor the cli
 # container can read them. Read builderN's log from inside its own container:
-#   docker compose exec builderN python -c "import urllib.request,sys; #       sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:7700/v1/requests/<id>/log').read().decode())"
+#   docker compose exec builderN python -c "import urllib.request,sys; \
+#       sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:7700/v1/requests/<id>/log').read().decode())"
 name: matrix
 
 x-builder: &builder

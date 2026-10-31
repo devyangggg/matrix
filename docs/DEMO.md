@@ -5,8 +5,8 @@ hotspot, one builder each**: n = 4, f = 1, every builder builds (R = 4), thresho
 6 minutes on stage. Every command below is copy-paste. Values marked `TBD` must be filled in
 before the rehearsal (X2).
 
-> `matrix up`, address discovery and `/v1/peers` are specified in rev 5 but not implemented yet
-> (backlog R1 to R5). Screen text shown for `matrix up` is indicative; the `release`, `verify`,
+> Every laptop runs `matrix up` natively (WSL2 on Windows, directly on Linux and macOS); Docker only
+> runs the sandboxed builds ([OPS.md §1](OPS.md)). Screen text shown for `matrix up` is approximate; the `release`, `verify`,
 > `status` and `evidence` lines are the real CLI output.
 
 | Machine | Node name | Role | Terminals |
@@ -33,8 +33,8 @@ checkout and `pip install -e .` only (no Docker needed).
 
 | Name | Value |
 |---|---|
-| `REPO` sample repo (H3) | `https://github.com/<org>/matrix-hello` |
-| `IMAGE` Go image, linux/amd64 digest (H4) | `golang@sha256:TBD` |
+| `REPO` sample repo (H3) | `https://github.com/ChaoticNebula5/matrix-hello` |
+| `IMAGE` Go image, linux/amd64 digest (H4) | `golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689` |
 
 Both must already be in `network.toml` (`allowed_repos`, `allowed_images`) in the commit every
 laptop has checked out. A different `network.toml` gives a different short code in scene 1.
@@ -44,8 +44,8 @@ every tag has its own hash):
 
 | Tag | Scene | Honest hash | Backdoored hash (`backdoor.patch`) |
 |---|---|---|---|
-| `v1.2.0` | 2 (happy path), 5 (old certificate) | `H120 = TBD` | |
-| `v1.2.1` | 3 (SolarWinds), 5 | `H121 = TBD` | `BAD121 = TBD` |
+| `v1.2.0` | 2 (happy path), 5 (old certificate) | `H120 = e432bbc584446abcbd1493a1bf29918ac2e2eb59de76bf70ee130a1d093fd1f5` | |
+| `v1.2.1` | 3 (SolarWinds), 5 | `H121 = 1ddd637bbb7565d2bc773dd923ef6600ce95f8997bc53b66ce1244a46caaea65` (one builder so far) | `BAD121 = TBD` |
 | `v1.2.2` | 6 (laptop drops off) | `H122 = TBD` | |
 | `v1.2.3` | 7 (caught cheater) | `H123 = TBD` | |
 | `v1.2.4` | spare | `H124 = TBD` | `BAD124 = TBD` |
@@ -59,7 +59,7 @@ The CLI signs the commit, not an annotated tag object, so resolve every tag to i
 
 ```bash
 cd ~/Matrix && . .venv/bin/activate
-export REPO=https://github.com/<org>/matrix-hello                   # H3
+export REPO=https://github.com/ChaoticNebula5/matrix-hello                   # H3
 
 # Prefer the peeled ref; use the tag ref itself only for lightweight tags.
 c() {
@@ -163,7 +163,7 @@ Then give V the pin. On A: `cp ~/.matrix/genesis.json ~/.matrix/genesis.sha256 "
 ```bash
 mkdir -p ~/.matrix && cp "$USB"/genesis.json "$USB"/genesis.sha256 ~/.matrix/
 cut -c1-16 ~/.matrix/genesis.sha256                # = the short code read aloud, without dashes
-export REPO=https://github.com/<org>/matrix-hello  # from the consumer, never from a certificate
+export REPO=https://github.com/ChaoticNebula5/matrix-hello  # from the consumer, never from a certificate
 ```
 
 Say: "No config, no admin: each laptop signed for itself, and we compared one code out loud."
@@ -183,7 +183,7 @@ Expected (row order and how many votes arrived before the CLI stopped vary; unre
 show `-`):
 
 ```
-request <64 hex> https://github.com/<org>/matrix-hello@v1.2.0
+request <64 hex> https://github.com/ChaoticNebula5/matrix-hello@v1.2.0
 request <64 hex>
 verdict AGREED <H120>
   laptop-c     laptop-c   <H120[:16]>      ok
@@ -204,7 +204,7 @@ matrix verify "$USB"/v1.2.0/hello --cert "$USB"/v1.2.0/hello.matrix.json --repo 
 echo "exit $?"
 ```
 
-Expected: `REPRODUCED <H120> https://github.com/<org>/matrix-hello@v1.2.0`, `exit 0`.
+Expected: `REPRODUCED <H120> https://github.com/ChaoticNebula5/matrix-hello@v1.2.0`, `exit 0`.
 
 Say: "Four independent laptops built the same bytes; two matching signatures make a certificate
 that anyone can check with no network at all."
@@ -279,7 +279,7 @@ matrix verify "$USB"/v1.2.1/hello --cert "$USB"/v1.2.0/hello.matrix.json --repo 
 echo "exit $?"
 ```
 
-Expected: `INVALID_CERT: certificate is for https://github.com/<org>/matrix-hello@v1.2.0`, `exit 2`.
+Expected: `INVALID_CERT: certificate is for https://github.com/ChaoticNebula5/matrix-hello@v1.2.0`, `exit 2`.
 
 Say: "Only exit 0 is success. A swapped binary or an old certificate fails closed in your CI."
 
@@ -384,7 +384,7 @@ quorum counts differ from the laptop demo).
 ```bash
 cp .env.example .env                       # set MATRIX_DATA (absolute), MATRIX_UID/GID, DOCKER_GID
 . ./.env && mkdir -p "$MATRIX_DATA" dist
-export REPO=https://github.com/<org>/matrix-hello IMAGE=golang@sha256:TBD
+export REPO=https://github.com/ChaoticNebula5/matrix-hello IMAGE=golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
 python scripts/dev_genesis.py --out dev --addrs compose --profile demo --repo "$REPO" --image "$IMAGE"
 docker pull --platform linux/amd64 "$IMAGE"
 docker compose build && docker compose up -d && docker compose ps   # 8 x healthy
