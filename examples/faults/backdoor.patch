@@ -1,0 +1,10 @@
+diff --git a/cmd/hello/main.go b/cmd/hello/main.go
+index 567e86e..aa7cff4 100644
+--- a/cmd/hello/main.go
++++ b/cmd/hello/main.go
+@@ -7,4 +7,5 @@ var version = "dev"
+ 
+ func main() {
+ 	fmt.Println("hello from matrix " + version)
++	fmt.Println("backdoor active")
+ }
