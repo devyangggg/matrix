@@ -16,6 +16,7 @@ from typing import Any
 from aiohttp import ClientError
 
 from . import node
+from .builder import MAX_ARTIFACT  # one limit for building and downloading (RFC §4)
 from .canon import canonical_json, loads_strict
 from .crypto import keygen, load_key, pubkey_hex
 from .discovery import (
@@ -51,7 +52,6 @@ from .select import selected
 from .verdict import Verdict, verdict
 
 RELEASE_POLL_S = 2
-MAX_ARTIFACT = 64 * 1024 * 1024  # RFC §4
 
 EXIT_OK = 0
 EXIT_MISMATCH = 1  # verify

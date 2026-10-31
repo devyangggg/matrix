@@ -237,3 +237,22 @@ def test_keygen_refuses_overwrite(tmp_path):
     out.write_text("keep me")
     assert run(["keygen", "--out", str(out)]) == 4
     assert out.read_text() == "keep me"
+
+
+def test_fuzz_mutated_certificates_never_verify_or_crash(files, capsys):
+    """RFC §9.1: malformed certificates through `verify`. Every byte of a canonical certificate
+    is signed or strictly checked, so no single-byte change may still give exit 0, and nothing
+    may reach the generic error handler (which would mean an exception escaped a parser)."""
+    import random
+
+    original = (files.tmp / "hello.matrix.json").read_bytes()
+    rng = random.Random(1234)
+    for _ in range(400):
+        b = bytearray(original)
+        i = rng.randrange(len(b))
+        b[i] = rng.choice([c for c in range(256) if c != b[i]])
+        files.write_cert(raw=bytes(b))
+        assert files.verify() in (1, 2, 4)
+    assert "unexpected error" not in capsys.readouterr().err
+    files.write_cert(raw=original)
+    assert files.verify() == 0  # the unmutated certificate still verifies
