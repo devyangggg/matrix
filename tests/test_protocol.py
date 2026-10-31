@@ -10,6 +10,7 @@ from matrix.genesis import parse_genesis
 from matrix.model import make_envelope, parse_envelope, request_id
 from matrix.protocol import Engine
 from matrix.select import selected
+from matrix.store import Store
 
 REPO = "https://github.com/org/hello"
 H1, H2 = "a" * 64, "b" * 64
@@ -24,11 +25,23 @@ async def until(cond, n=500):
     raise AssertionError("condition not reached")
 
 
+class LoggedStore(Store):
+    """The real Store, recording the commit in the shared call log (persist-before-broadcast)."""
+
+    def __init__(self, log: list):
+        super().__init__(":memory:")
+        self.log = log
+
+    def record_own_attestation(self, *args, **kw):
+        self.log.append(("store", "record_own_attestation"))
+        super().record_own_attestation(*args, **kw)
+
+
 class Rig:
-    def __init__(self, g, keys, clock, monkeypatch, me, outcomes, fault, gate):
+    def __init__(self, g, keys, clock, monkeypatch, me, outcomes, fault, gate, store_kind):
         self.g, self.keys, self.clock, self.me, self.mp = g, keys, clock, me, monkeypatch
         self.log: list = []
-        self.store = FakeStore(self.log)
+        self.store = FakeStore(self.log) if store_kind == "fake" else LoggedStore(self.log)
         self.fault = fault or FakeFault()
         self.env = BuildEnv("/tmp/mx", me, 1000, 1000)
         self.tasks: list[asyncio.Task] = []
@@ -64,12 +77,12 @@ class Rig:
         return self.store.get_request(rid)["phase"]
 
 
-@pytest.fixture
-async def make_rig(genesis, keys, clock, monkeypatch):
+@pytest.fixture(params=["fake", "real"])  # every test runs against FakeStore and the real Store
+async def make_rig(request, genesis, keys, clock, monkeypatch):
     rigs = []
 
     def make(g=None, me="builder1", outcomes=None, fault=None, gate=None) -> Rig:
-        rig = Rig(g or genesis, keys, clock, monkeypatch, me, outcomes, fault, gate)
+        rig = Rig(g or genesis, keys, clock, monkeypatch, me, outcomes, fault, gate, request.param)
         rigs.append(rig)
         return rig
 
@@ -127,7 +140,7 @@ async def test_rejected_requests(make_rig, make, status, error):
     rig = make_rig()
     got = await rig.engine.on_request(make(rig))
     assert (got[0], got[1]["error"]) == (status, error)
-    assert not rig.store.requests and not rig.peers.requests_sent
+    assert not rig.store.list_requests(0) and not rig.peers.requests_sent
 
 
 async def test_unknown_signer_is_forbidden(make_rig, keys):
@@ -334,7 +347,7 @@ async def test_rejected_attestations(make_rig, make, status, error):
     rid = await rig.submit()
     got = await rig.engine.on_attest(make(rig, rid), None)
     assert (got[0], got[1]["error"]) == (status, error)
-    assert not rig.store.atts
+    assert rig.store.attestations(rid) == []
 
 
 async def test_attestation_from_non_selected_signer_is_rejected(genesis_dict, make_rig):
