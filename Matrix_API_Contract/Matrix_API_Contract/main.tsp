@@ -30,7 +30,10 @@ enum PeerId {
 model PeerConfiguration {
   id: PeerId;
   public_key_hex: HashHex;
+  @pattern("^(?:\\d{1,3}\\.){3}\\d{1,3}$")
   vpn_ip: string;
+  /** Exactly http on the VPN address and port 8443, with no path or trailing slash. */
+  @pattern("^http://(?:\\d{1,3}\\.){3}\\d{1,3}:8443$")
   api_url: string;
 }
 
@@ -45,6 +48,7 @@ model TemplateConfiguration {
   memory_mib: 256;
   pids_limit: 64;
   timeout_seconds: 120;
+  /** Required `schema_version` of a canonical result. */
   output_schema_version: 1;
 }
 
@@ -99,12 +103,16 @@ model SignedJob {
 
 /** Exact integer result; samples and seed must equal the job parameters. */
 model MonteCarloResult {
-  schema_version: 1;
+  /** Exactly 1 in protocol version 1; must equal the catalogue output_schema_version. */
+  @minValue(1)
+  @maxValue(1)
+  schema_version: uint8;
   @minValue(100000)
   @maxValue(10000000)
   samples: uint32;
   seed: uint32;
   /** Must be <= samples. Only independent execution may justify signing it. */
+  @minValue(0)
   @maxValue(10000000)
   hits: uint32;
 }
@@ -184,18 +192,16 @@ model Health {
   @minValue(0)
   @maxValue(1)
   running: uint32;
-  @maxValue(8)
+  /** Waiting executions; section 5.5 allows at most one. */
+  @minValue(0)
+  @maxValue(1)
   queued: uint32;
 }
 
-model JobIndexEntry {
-  job_id: HashHex;
-  certified_hint: boolean;
-}
-
 model JobIndex {
+  /** Known job IDs; the index is a hint, not an authority. */
   @maxItems(32)
-  jobs: JobIndexEntry[];
+  jobs: HashHex[];
 }
 
 model ExecutionAccepted {
@@ -206,8 +212,8 @@ model ExecutionAccepted {
 }
 
 model Ingested {
+  /** The record is now stored locally; certification is derived from evidence. */
   stored: true;
-  certified_hint: boolean;
 }
 
 model JobSnapshot {
@@ -231,6 +237,8 @@ enum ErrorCode {
   UNKNOWN_MEMBER,
   CONFIG_MISMATCH,
   UNKNOWN_JOB,
+  /** Optional file-based profile only. */
+  UNKNOWN_ARTIFACT,
   JOB_CONFLICT,
   INVARIANT_VIOLATION,
   PAYLOAD_TOO_LARGE,
@@ -239,6 +247,7 @@ enum ErrorCode {
   JOB_LIMIT,
   IMAGE_UNAVAILABLE,
   LOCAL_STORAGE_ERROR,
+  INTERNAL_ERROR,
 }
 
 model ErrorBody {
@@ -249,8 +258,32 @@ model ErrorBody {
 }
 
 @error
-model ApiError {
-  @statusCode status: 400 | 403 | 404 | 409 | 413 | 429 | 503;
+model ServiceError {
+  @statusCode status: 500 | 503;
+  @body body: ErrorBody;
+}
+
+@error
+model JobReadError {
+  @statusCode status: 400 | 403 | 404 | 500 | 503;
+  @body body: ErrorBody;
+}
+
+@error
+model JobStoreError {
+  @statusCode status: 400 | 403 | 409 | 413 | 429 | 500 | 503;
+  @body body: ErrorBody;
+}
+
+@error
+model ExecuteError {
+  @statusCode status: 400 | 403 | 404 | 429 | 500 | 503;
+  @body body: ErrorBody;
+}
+
+@error
+model EvidenceError {
+  @statusCode status: 400 | 403 | 404 | 409 | 413 | 429 | 500 | 503;
   @body body: ErrorBody;
 }
 
@@ -258,20 +291,20 @@ model ApiError {
 interface PeerApi {
   @get
   @route("/health")
-  health(): Health;
+  health(): Health | ServiceError;
 
   @get
   @route("/jobs")
-  listJobs(): JobIndex;
+  listJobs(): JobIndex | ServiceError;
 
   /** Persist the signed job before returning a signed storage receipt. */
   @put
   @route("/jobs/{job_id}")
-  storeJob(@path job_id: HashHex, @body job: SignedJob): SignedJobReceipt | ApiError;
+  storeJob(@path job_id: HashHex, @body job: SignedJob): SignedJobReceipt | JobStoreError;
 
   @get
   @route("/jobs/{job_id}")
-  getJob(@path job_id: HashHex): JobSnapshot | ApiError;
+  getJob(@path job_id: HashHex): JobSnapshot | JobReadError;
 
   /** Bodyless, idempotent request; requires an existing validated signed job. */
   @post
@@ -279,15 +312,15 @@ interface PeerApi {
   execute(@path job_id: HashHex): {
     @statusCode status: 202;
     @body body: ExecutionAccepted;
-  } | ApiError;
+  } | ExecuteError;
 
-  /** Verify and merge a signed candidate. Never trust certified_hint from a peer. */
+  /** Verify and merge a signed candidate; certification is derived from evidence. */
   @post
   @route("/jobs/{job_id}/results")
-  announceResult(@path job_id: HashHex, @body announcement: ResultAnnouncement): Ingested | ApiError;
+  announceResult(@path job_id: HashHex, @body announcement: ResultAnnouncement): Ingested | EvidenceError;
 
   /** Persist the entire validated package before acknowledging result storage. */
   @post
   @route("/jobs/{job_id}/certificates")
-  storeCertificate(@path job_id: HashHex, @body package: CertifiedResult): SignedResultReceipt | ApiError;
+  storeCertificate(@path job_id: HashHex, @body package: CertifiedResult): SignedResultReceipt | EvidenceError;
 }
