@@ -2,15 +2,28 @@
 
 import asyncio
 import json
+import math
 import re
 import time
 from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
+from matrix.canon import _no_dup_pairs
 
 HTTP_TIMEOUT_S = 3
 _HEX64 = r"[0-9a-f]{64}"
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("nonfinite JSON number")
+    return parsed
+
+
+def _reject_nonfinite(_: str) -> None:
+    raise ValueError("nonfinite JSON constant")
 
 
 def _error(code: str, status: int) -> web.Response:
@@ -211,7 +224,15 @@ class PeerClient:
             async with self.session.get(url) as response:
                 if response.status != 200:
                     return None
-                return await response.json()
+                data = await response.content.read(1024 * 1024 + 1)
+                if len(data) > 1024 * 1024:
+                    return None
+                return json.loads(
+                    data,
+                    object_pairs_hook=_no_dup_pairs,
+                    parse_float=_finite_float,
+                    parse_constant=_reject_nonfinite,
+                )
         except (ClientError, OSError, TimeoutError, ValueError):
             return None
 

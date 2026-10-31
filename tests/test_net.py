@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from matrix.net import PeerClient, make_app
@@ -199,6 +200,40 @@ async def test_peer_client_posts_hint_and_bounds_download(api):
         (b'{"hello":"world"}', "builder1"),
         (b'{"x":"' + b"a" * 1016 + b'"}', "builder1"),
     }
+
+
+@pytest.mark.asyncio
+async def test_peer_json_rejects_oversize_duplicates_and_nonfinite():
+    responses = {
+        "oversize": b'{"value":"' + b"x" * (1024 * 1024) + b'"}',
+        "duplicate": b'{"items":[{"now":1,"now":2}]}',
+        "nan": b'{"now":NaN}',
+        "infinity": b'{"now":Infinity}',
+        "overflow": b'{"now":1e999}',
+        "finite": b'{"now":1234.5,"items":[{"received_at":1234.25}]}',
+    }
+    app = web.Application()
+    for name, body in responses.items():
+        async def reply(request, payload=body):
+            return web.Response(body=payload, content_type="application/json")
+
+        app.router.add_get(f"/{name}", reply)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    address = f"{client.make_url('/').host}:{client.make_url('/').port}"
+    me = SimpleNamespace(id="builder1")
+    peer = SimpleNamespace(id="builder2", addr=address)
+    peers = PeerClient(SimpleNamespace(node=lambda node_id: peer), me)
+    try:
+        for name in ("oversize", "duplicate", "nan", "infinity", "overflow"):
+            assert await peers.get_json(peer.id, f"/{name}") is None
+        assert await peers.get_json(peer.id, "/finite") == {
+            "now": 1234.5,
+            "items": [{"received_at": 1234.25}],
+        }
+    finally:
+        await peers.close()
+        await client.close()
 
 
 def test_node_rejects_fault_flags_without_opt_in(tmp_path, capsys):

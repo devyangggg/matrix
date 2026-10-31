@@ -6,6 +6,7 @@ import time
 from hashlib import sha256
 
 import pytest
+from aiohttp import ClientError
 from harness import IMAGE, REPO, ROOT, Network
 from nacl.signing import SigningKey
 
@@ -149,7 +150,7 @@ async def test_crash_mode_exits_and_remaining_builders_certify(tmp_path):
         _, request, _ = signed_request(network)
         try:
             await network.post("builder7", "/v1/requests", request)
-        except (OSError, TimeoutError):
+        except (ClientError, OSError, TimeoutError):
             pass
         assert await asyncio.wait_for(network.processes["builder7"].wait(), 5) == 1
         assert (await collect(network, *(await release(network)))).state == "AGREED"
