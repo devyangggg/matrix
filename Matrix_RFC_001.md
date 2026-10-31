@@ -876,12 +876,14 @@ One command per laptop creates a network: no files to edit, no authority. Member
   "type": "founder",
   "signer": "<node pubkey hex>",
   "body": {"network_id": "matrix-acme-2026", "id": "laptop-a", "pubkey": "<node pubkey hex>",
-           "release_pubkey": "<release pubkey hex>", "params_hash": "<64 hex>"},
+           "release_pubkey": "<release pubkey hex>", "release_sig": "<128 hex>",
+           "params_hash": "<64 hex>"},
   "sig": "<128 hex>"
 }
 ```
 
 - Signed with the node key over `b"matrix/v1-founder\0" + network_id + b"\0" + canonical_json(unsigned)`. No genesis exists yet, so the network name takes the place of the genesis hash. The self-signature proves possession of the key; `signer` must equal `body.pubkey`.
+- `release_sig` is made with the **release** key over `b"matrix/v1-founder " + network_id + b" " + canonical_json({"pubkey", "release_pubkey"})`. It proves possession of the release key too, so a founder cannot list someone else's release key as its own.
 - `params_hash` = SHA-256 of the canonical JSON of the `network.toml` values.
 - The screen lists founders as they appear (name and a short key fingerprint) and flags any founder whose `params_hash` differs from ours.
 

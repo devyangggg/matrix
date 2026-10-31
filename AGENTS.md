@@ -179,6 +179,8 @@ Cut order if behind: RFC §9.4. **Never cut** the items listed there.
 
 Spec: RFC rev 5 (founding ceremony, address discovery, demo), HLD §5.1 and §6.1–§6.2. Owner track in brackets. Static membership, the security core and every §13.2 invariant are unchanged.
 
+**Status (branch `roovy-4`):** R1–R6 implemented with unit tests. The integration fault matrix (R6) is written and collects, but has not run yet: it needs Docker, the pinned image and the pushed sample repo. R7 is open.
+
 | ID | Task | Depends | Accept |
 |---|---|---|---|
 | R1 | [C] `matrix/discovery.py`: hello build / parse / verify (≤ 512 bytes, strict keys, signer in genesis, our genesis hash, `seq` strictly increasing, signature last), in-memory address book, UDP announcer and listener on 7788 (every 5 s, at start, on address change, unicast reply to a new or changed member), online window 15 s. Standard library only | A3 | `test_discovery`: valid hello accepted; stranger, forged, replayed, oversized and wrong-genesis hellos dropped without raising; online/offline by `last_seen` |
@@ -186,7 +188,7 @@ Spec: RFC rev 5 (founding ceremony, address discovery, demo), HLD §5.1 and §6.
 | R3 | [A] `genesis.py`: `addr` optional. [C] `node.py`: discovery task, `--advertise HOST:PORT`, `--no-discovery` (for the local harness) | R1 | `test_genesis`: genesis without `addr` loads, all other parse rules unchanged; the node starts with and without discovery |
 | R4 | [D] `cli.py`: `matrix up` (local keys under `~/.matrix/keys/`, `network.toml`, founder and endorse messages, seal checks, deterministic genesis, short code, unanimous endorsement, 5 min abort, `--refound`, fault flag pass-through, then start the node); address resolution via `/v1/peers` with every hello re-verified; default paths under `~/.matrix/` | R1, R2, R3 | `test_cli` with fake sockets: 4 founders give byte-identical genesis and short code; seal refused below 4 founders, duplicate ids or a `params_hash` mismatch; missing endorsement aborts and writes nothing; rogue founder only changes the short code |
 | R5 | [D] `tui.py`: Builders screen shows address, online/offline, last seen and genesis match from the local node's `/v1/peers`; log tail only for the local builder | R2 | Manual: 4 builders online on the hotspot; a laptop with Wi-Fi off turns offline in ~15 s |
-| R6 | [C] `network.toml`; `scripts/dev_genesis.py --nodes 4`; compose and fault files for n = 4; integration fault matrix for f = 1 | R3 | Integration: one faulty builder never certifies a wrong hash; 1 faulty + 1 offline certifies; 3 offline stays `PENDING` |
+| R6 | [C] `network.toml`; `scripts/dev_genesis.py --nodes 4`; compose for n = 4 needs no new file: with a `--nodes 4` dev genesis start only `builder1..4` (the existing fault overrides on builder3 and builder2 apply); integration fault matrix for f = 1 | R3 | Integration: one faulty builder never certifies a wrong hash; 1 faulty + 1 offline certifies; 3 offline stays `PENDING` |
 | R7 | [all] 4-laptop end-to-end over the hotspot, then two rehearsals following only `DEMO.md` | R1–R6, D5 | All 7 demo scenes (§10) pass twice |
 
 ## 7. Git workflow
@@ -285,8 +287,10 @@ On every PR and on `main`: Ubuntu, Python 3.11, `pip install -e ".[dev]"`, `ruff
 
 A separate public GitHub repo, `https://github.com/<org>/matrix-hello` (H3), because builders clone from GitHub and genesis only allows `https://github.com/...` URLs.
 
+Template: [examples/sample-repo/](examples/sample-repo/). `scripts/make_sample_repo.sh DIR` builds the git history with every tag below and prints each tag's commit; push it to the public repo.
+
 ```
-go.mod            module github.com/<org>/matrix-hello   go 1.23   (no dependencies)
+go.mod            module matrix-hello   go 1.23   (no dependencies)
 cmd/hello/main.go prints "hello from matrix " + version; var version = "dev"
 matrix.toml       image "go1.23", package "./cmd/hello", goos "linux", goarch "amd64",
                   ldflags "-s -w -buildid= -X main.version=<tag>" (per tag), output "hello"
