@@ -1,0 +1,18 @@
+# Secrets and generated dev network (scripts/dev_genesis.py)
+dev/
+*.key
+.env
+
+# Runtime data
+data/
+dist/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/

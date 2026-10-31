@@ -1,0 +1,31 @@
+# Demo fault overrides (RFC §7.14, §9.2). Edit, then restart only the builders you changed:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builder3
+#
+# Reset a builder to honest with: docker compose up -d builder3
+# Keep at most f = 2 builders faulty at once (crash is honest and does not count toward f).
+services:
+  # Scene 2 (SolarWinds): builder3 applies a backdoor patch before building.
+  builder3:
+    command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder3, --key, /etc/matrix/keys/builder3.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder3",
+              --allow-faults, --fault, inject, --patch, /etc/matrix/faults/backdoor.patch]
+    volumes:
+      - ./examples/faults:/etc/matrix/faults:ro
+
+  # Scene 3 (a whole laptop is hacked): uncomment both, set H to the backdoored hash.
+  # builder5:
+  #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder5, --key, /etc/matrix/keys/builder5.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder5",
+  #             --allow-faults, --fault, collude, --hash, "<64 hex>"]
+  # builder6:
+  #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder6, --key, /etc/matrix/keys/builder6.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder6",
+  #             --allow-faults, --fault, collude, --hash, "<64 hex>"]
+
+  # Scene 6 (caught cheater):
+  # builder2:
+  #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder2, --key, /etc/matrix/keys/builder2.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder2",
+  #             --allow-faults, --fault, equivocate]
+
+  # crash: also set restart: "no", otherwise compose restarts it in a loop.
+  # builder7:
+  #   restart: "no"
+  #   command: [..., --allow-faults, --fault, crash]

@@ -1,0 +1,413 @@
+openapi: 3.1.0
+info:
+  title: Matrix builder API
+  version: 1.0.0
+  description: |
+    HTTP API served by every Matrix builder (`matrix-node`). See RFC-0001 rev 4 §7.9
+    and docs/LLD.md §3.10.
+
+    - Every builder serves the same API. There is no central server.
+    - Bound to the builder's mesh IP only (tinc). There is no HTTP authentication:
+      integrity comes from Ed25519 signatures inside the envelopes, which every
+      receiver re-verifies. Treat every response as untrusted.
+    - All JSON is UTF-8. Signed objects are compared and hashed in canonical JSON
+      (sorted keys, separators "," and ":", no floats).
+servers:
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: 10.77.0.1
+        description: Builder mesh IP (tinc) or compose service name (builder1..builder8)
+      port:
+        default: "7700"
+        description: 7700 + k for the k-th builder on a laptop
+
+tags:
+  - name: requests
+  - name: attestations
+  - name: artifacts
+  - name: ops
+
+paths:
+  /v1/health:
+    get:
+      tags: [ops]
+      summary: Builder identity and genesis hash
+      operationId: getHealth
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /v1/requests:
+    post:
+      tags: [requests]
+      summary: Submit or forward a signed release request
+      description: |
+        Idempotent: a request that is already known returns 202 with the same id and
+        is not forwarded again. A new valid request is stored with the local receipt
+        time t0 and pushed to all peers.
+      operationId: submitRequest
+      parameters:
+        - $ref: "#/components/parameters/MatrixFrom"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseEnvelope" }
+      responses:
+        "202":
+          description: Accepted (new or already known)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    get:
+      tags: [requests]
+      summary: Requests received since a time on this builder's clock
+      description: Used by pull sync and the TUI. `now` is this builder's clock; peers use it as their next cursor.
+      operationId: listRequests
+      parameters:
+        - $ref: "#/components/parameters/Since"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestList" }
+
+  /v1/requests/{id}:
+    get:
+      tags: [requests]
+      summary: Signed request envelope and local phase
+      operationId: getRequest
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/requests/{id}/bundle:
+    get:
+      tags: [attestations]
+      summary: Signed request plus all stored attestations for it
+      description: Clients take the union of bundles from at least f+1 builders and run verdict() locally.
+      operationId: getBundle
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Bundle" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/requests/{id}/log:
+    get:
+      tags: [ops]
+      summary: Last 64 KiB of this builder's own build log for the request
+      operationId: getLog
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string, maxLength: 65536 }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/messages:
+    post:
+      tags: [attestations]
+      summary: Push a signed attestation
+      description: |
+        Stored only if the envelope is valid, the request is known and within its TTL,
+        the signer is in the request's selected set, and the signer has fewer than 2
+        stored attestations for it. Re-sending a stored envelope returns 202.
+      operationId: pushMessage
+      parameters:
+        - $ref: "#/components/parameters/MatrixFrom"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AttestEnvelope" }
+      responses:
+        "202":
+          description: Accepted (stored, duplicate, or ignored because the per-signer cap is reached)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: Request unknown (`unknown_request`) or past its TTL (`expired`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+
+  /v1/artifacts/{sha256}:
+    get:
+      tags: [artifacts]
+      summary: Raw bytes of an artifact this builder built itself
+      description: |
+        Untrusted: the caller must check that sha256(body) equals the path parameter.
+        A malformed hash returns 404. Artifacts are kept for 24 hours.
+      operationId: getArtifact
+      parameters:
+        - name: sha256
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Hex64" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary, maxLength: 67108864 }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/evidence:
+    get:
+      tags: [ops]
+      summary: Evidence records detected by this builder
+      operationId: listEvidence
+      parameters:
+        - $ref: "#/components/parameters/Since"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceList" }
+
+components:
+  parameters:
+    RequestId:
+      name: id
+      in: path
+      required: true
+      description: sha256 of the canonical JSON of the request body
+      schema: { $ref: "#/components/schemas/Hex64" }
+    Since:
+      name: since
+      in: query
+      required: false
+      description: Unix time in seconds on this builder's clock (inclusive). Default 0.
+      schema: { type: number, minimum: 0, default: 0 }
+    MatrixFrom:
+      name: X-Matrix-From
+      in: header
+      required: false
+      description: Pushing builder's node id. A hint for where to fetch an unknown request. Never trusted.
+      schema: { $ref: "#/components/schemas/Id" }
+
+  responses:
+    BadRequest:
+      description: Malformed, badly signed or otherwise invalid envelope (`invalid_envelope`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Signer is not a genesis release signer, or repo is not allowed (`forbidden`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: Body over the limit (4 KiB for requests, 1 KiB for messages) (`too_large`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Over 20 new requests per minute on this builder (`rate_limited`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found (`not_found`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Hex64:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    Sig:
+      type: string
+      pattern: "^[0-9a-f]{128}$"
+      description: Ed25519 signature over b"matrix/v1\0" + genesis_hash + b"\0" + canonical_json({v, type, signer, body})
+    Id:
+      type: string
+      pattern: "^[A-Za-z0-9_-]{1,32}$"
+      description: Builder or release-signer id from genesis
+    Result:
+      type: string
+      pattern: "^([0-9a-f]{64}|FAILED)$"
+      description: sha256 of the built binary, or FAILED for a deterministic build failure
+    Phase:
+      type: string
+      enum: [RECEIVED, BUILDING, ATTESTED, MISSED, SHED, OBSERVING]
+
+    ReleaseRequest:
+      type: object
+      additionalProperties: false
+      required: [v, repo_url, commit, tag]
+      properties:
+        v: { type: integer, const: 1 }
+        repo_url:
+          type: string
+          pattern: "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          description: Must be exactly one of genesis allowed_repos
+        commit: { type: string, pattern: "^[0-9a-f]{40}$" }
+        tag: { type: string, pattern: "^[A-Za-z0-9_.+-]{1,64}$" }
+
+    ReleaseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [v, type, signer, body, sig]
+      description: Signed by a genesis release signer. Canonical JSON size ≤ 4096 bytes.
+      properties:
+        v: { type: integer, const: 1 }
+        type: { type: string, const: release }
+        signer: { $ref: "#/components/schemas/Id" }
+        body: { $ref: "#/components/schemas/ReleaseRequest" }
+        sig: { $ref: "#/components/schemas/Sig" }
+
+    AttestBody:
+      type: object
+      additionalProperties: false
+      required: [request_id, result]
+      properties:
+        request_id: { $ref: "#/components/schemas/Hex64" }
+        result: { $ref: "#/components/schemas/Result" }
+
+    AttestEnvelope:
+      type: object
+      additionalProperties: false
+      required: [v, type, signer, body, sig]
+      description: Signed by a genesis builder in the request's selected set. Canonical JSON size ≤ 1024 bytes.
+      properties:
+        v: { type: integer, const: 1 }
+        type: { type: string, const: attest }
+        signer: { $ref: "#/components/schemas/Id" }
+        body: { $ref: "#/components/schemas/AttestBody" }
+        sig: { $ref: "#/components/schemas/Sig" }
+
+    Health:
+      type: object
+      required: [node_id, version, genesis_hash, now]
+      properties:
+        node_id: { $ref: "#/components/schemas/Id" }
+        version: { type: string, examples: ["0.1.0"] }
+        genesis_hash: { $ref: "#/components/schemas/Hex64" }
+        now: { type: number, description: Builder clock, unix seconds }
+
+    RequestAccepted:
+      type: object
+      required: [id]
+      properties:
+        id: { $ref: "#/components/schemas/Hex64" }
+
+    MessageAccepted:
+      type: object
+      required: [msg_id]
+      properties:
+        msg_id: { $ref: "#/components/schemas/Hex64" }
+
+    RequestSummary:
+      type: object
+      required: [id, phase, received_at]
+      properties:
+        id: { $ref: "#/components/schemas/Hex64" }
+        phase: { $ref: "#/components/schemas/Phase" }
+        received_at: { type: number, description: Local t0 on this builder's clock }
+
+    RequestList:
+      type: object
+      required: [now, requests]
+      properties:
+        now: { type: number, description: This builder's clock; the caller's next cursor }
+        requests:
+          type: array
+          items: { $ref: "#/components/schemas/RequestSummary" }
+
+    RequestDetail:
+      type: object
+      required: [request, phase, received_at]
+      properties:
+        request: { $ref: "#/components/schemas/ReleaseEnvelope" }
+        phase: { $ref: "#/components/schemas/Phase" }
+        received_at: { type: number }
+
+    Bundle:
+      type: object
+      required: [request, envelopes]
+      properties:
+        request: { $ref: "#/components/schemas/ReleaseEnvelope" }
+        envelopes:
+          type: array
+          description: All stored attestations for the request (at most 2 per signer)
+          items: { $ref: "#/components/schemas/AttestEnvelope" }
+
+    Evidence:
+      type: object
+      required: [id, kind, signer, request_id, proof, created_at]
+      properties:
+        id: { type: integer }
+        kind: { type: string, enum: [EQUIVOCATION, DISAGREE, STALL] }
+        signer: { $ref: "#/components/schemas/Id" }
+        request_id: { $ref: "#/components/schemas/Hex64" }
+        proof:
+          description: Envelopes proving the claim; null for STALL (absence has no proof)
+          oneOf:
+            - type: "null"
+            - type: array
+              items: { $ref: "#/components/schemas/AttestEnvelope" }
+        created_at: { type: number }
+
+    EvidenceList:
+      type: object
+      required: [now, evidence]
+      properties:
+        now: { type: number }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/Evidence" }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [invalid_envelope, forbidden, too_large, rate_limited, unknown_request, expired, not_found]
+        detail: { type: string }
+
+    Certificate:
+      type: object
+      additionalProperties: false
+      required: [v, genesis_hash, request, attestations]
+      description: |
+        Not served by the API. Written by `matrix release` as `<output>.matrix.json`
+        and checked offline by `matrix verify`. Size ≤ 64 KiB.
+      properties:
+        v: { type: integer, const: 1 }
+        genesis_hash: { $ref: "#/components/schemas/Hex64" }
+        request: { $ref: "#/components/schemas/ReleaseEnvelope" }
+        attestations:
+          type: array
+          minItems: 1
+          description: Attestations whose result is the certified hash (at least threshold distinct signers)
+          items: { $ref: "#/components/schemas/AttestEnvelope" }
