@@ -16,3 +16,6 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+
+# uv lockfile (CI uses pip)
+uv.lock

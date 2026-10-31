@@ -6,11 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "matrix"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = [
-    "pynacl>=1.5",
-    "aiohttp>=3.9",
-    "textual>=0.60",
-]
+dependencies = ["pynacl>=1.5", "aiohttp>=3.9", "textual>=0.60"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
@@ -31,7 +27,6 @@ addopts = "-m 'not integration'"
 line-length = 100
 target-version = "py311"
 
+# Same tools as the `dev` extra: `uv sync` installs dependency groups, not extras. Keep both in step.
 [dependency-groups]
-dev = [
-    "pytest>=9.2.0",
-]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
