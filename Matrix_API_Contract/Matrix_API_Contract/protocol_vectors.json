@@ -227,11 +227,11 @@
     },
     {
       "id": "NEG-04",
-      "rule": "Changing a signed parameter invalidates the signature. The signature here was produced over samples=100000.",
+      "rule": "The job ID is recomputed for the altered spec, so the identity check passes; the attached signature is the original one over samples=100000 and must fail.",
       "input": {
         "payload": {
           "domain": "matrix.job.v1",
-          "job_id": "2df070c4551285354d9e01c236e1fef18e1c9cc6c72e4a46f539b62ee054692c",
+          "job_id": "d14f9db079935571463623f87efc629c6a2c018cd4832a64ba71ac80d5a9e6c5",
           "spec": {
             "protocol_version": 1,
             "config_hash": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -251,7 +251,7 @@
     },
     {
       "id": "NEG-05",
-      "rule": "A wrong domain invalidates the signature, even though the signer is a member.",
+      "rule": "The domain is a schema literal in protocol version 1; a different string fails schema validation before any signature is checked. Signature coverage of payload bytes is exercised by NEG-04.",
       "input": {
         "payload": {
           "domain": "matrix.execution.v2",
@@ -263,7 +263,7 @@
         "signature": "4bc5017e82286ff8957117d79efdf1557e0aaed63aca26d415700aee40fe48c64cfc1d28b5651249df92de46ad8e19f58da7ef53e6c6a109d8d768b330a56b0f"
       },
       "expected_status": 400,
-      "expected_error": "BAD_SIGNATURE"
+      "expected_error": "INVALID_SCHEMA"
     },
     {
       "id": "NEG-06",

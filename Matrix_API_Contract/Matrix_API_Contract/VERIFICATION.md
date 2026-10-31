@@ -13,7 +13,7 @@ Prepared 31 October 2026 for RFC 001 revision 1.3. These checks concern the deli
 - The emitted execution-certificate schema requires exactly two attestations; distinctness, matching bindings, ordering, and signatures remain runtime checks.
 - Canonical JSON and SHA-256 in `protocol_vectors.json` were recomputed: both workload fixtures, the job spec and job ID, and the trusted configuration fixture (canonical bytes and `config_hash`) all matched.
 - Ed25519 signatures verified against the published public keys: the signed job, both execution attestations, the job storage receipt, and the result storage receipt. The certificate's signers are distinct and sorted.
-- Negative vectors reject for the stated reason: duplicate object key, boolean as integer, unknown property, altered signed parameter, wrong domain, and a valid signature from a non-member key.
+- Negative vectors isolate their expected error: duplicate key, boolean integer, unknown property, and a non-literal domain fail schema validation; the altered-parameter job has a recomputed job ID so only its signature fails; the non-member case carries a valid signature under a stranger key and fails under the pinned key.
 - The expired receipt example is outside its signed deadline and must not be counted as durability.
 - Sample signed job, result, and certificate-package sizes fit the RFC body limits.
 - The two workload fixtures were calculated from the RFC integer reference algorithm.

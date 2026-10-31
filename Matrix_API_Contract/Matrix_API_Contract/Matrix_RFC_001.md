@@ -220,7 +220,7 @@ All four configuration hashes and image IDs match; all peer APIs are reachable t
 
 Define `C(x)` as UTF-8 JSON with lexicographically sorted object keys, compact separators, `ensure_ascii=True`, and `allow_nan=False`. All protocol fields use ASCII strings, booleans, arrays, objects, and bounded integers. Floats, null, duplicate JSON keys, unknown properties, and booleans supplied as integers MUST be rejected. Arrays retain their order. Hashes are 64 lowercase hex characters; Ed25519 signatures are 128 lowercase hex characters.
 
-Python's reference encoder is `json.dumps(x, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")`. Parse with duplicate-key rejection before schema validation. Pydantic models use strict integers and `extra="forbid"`. Do not hash model defaults that were absent from a request: every signed field is required.
+Python's reference encoder is `json.dumps(x, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")`. Parse with duplicate-key rejection before schema validation; validation order for every record is byte cap, duplicate-key parse, schema including literal domains, identity hashes, membership and configuration binding, then signatures. The published negative vectors assume this order. Pydantic models use strict integers and `extra="forbid"`. Do not hash model defaults that were absent from a request: every signed field is required.
 
 Sign `C(payload)` directly. Domains inside signed payloads are mandatory:
 

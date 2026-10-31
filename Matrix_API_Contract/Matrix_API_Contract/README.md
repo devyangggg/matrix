@@ -23,7 +23,7 @@ The compiler writes `tsp-output/@typespec/openapi3/openapi.yaml`. The top-level 
 
 ## Runtime rules beyond the schema
 
-Implement strict Pydantic models with unknown fields forbidden and strict integer validation. Reject duplicate JSON keys before model validation. Enforce signature domains, membership/configuration binding, content hashes, exact two-signer certificates, distinct signer IDs, signer order, and result-to-job parameter equality using RFC 001. The OpenAPI schema alone cannot enforce those cryptographic or cross-field invariants.
+Implement strict Pydantic models with unknown fields forbidden and strict integer validation. Reject duplicate JSON keys before model validation. Apply checks in the RFC order: byte cap, duplicate-key parse, schema including literal domains, identity hashes, membership and configuration, then signatures; the published negative vectors expect those codes. Enforce exact two-signer certificates, distinct signer IDs, signer order, and result-to-job parameter equality using RFC 001. The OpenAPI schema alone cannot enforce those cryptographic or cross-field invariants.
 
 Index entries, health fields, and remote local-state fields are diagnostics; verify the embedded evidence yourself. A storage signature never counts as an execution signature. Expired storage receipts do not prove current durability.
 
