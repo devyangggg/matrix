@@ -758,6 +758,6 @@ To get the single-platform digest: `docker buildx imagetools inspect golang:1.23
 - Containers run as `MATRIX_UID:MATRIX_GID` with the host `docker` group added, so `--user <uid>:<gid>` and `rm -rf work/<id>` behave as on a laptop.
 - The `cli` service (profile `tools`) runs `matrix` inside the compose network, where `builderN:7700` resolves; pass `--node builder1:7700`. The log tail is loopback-only, so the TUI there shows no logs (use `docker compose logs` or the data dir).
 - [docker-compose.faults.yml](../docker-compose.faults.yml) is an override example that restarts chosen builders with fault flags for the demo scenes.
-- With a `--nodes 4` dev genesis, start only `builder1..4` (`docker compose up -d builder1 builder2 builder3 builder4`); builder5..8 are not in that genesis and would refuse to start.
+- builder5..8 carry the compose profile `eight`. `.env` sets `COMPOSE_PROFILES=eight` for a `--nodes 8` dev genesis (the default) and leaves it empty for `--nodes 4`, so `docker compose up -d` starts exactly the builders in genesis; builder5..8 are not in a `--nodes 4` genesis and would restart forever (`node id is not in genesis`).
 
 Mounting the Docker socket gives root-equivalent access to the host. This is for development only.

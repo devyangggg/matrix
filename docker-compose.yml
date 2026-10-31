@@ -1,12 +1,25 @@
-# Single-machine Matrix network: 8 builders on 4 simulated operators (laptopA..D).
-# Linux or WSL2 only. Setup: docs/LLD.md §12 and AGENTS.md "Run it".
+# Single-machine Matrix network: 8 builders on 4 simulated operators (laptopA..D), or 4 builders,
+# one per operator (the rev 5 demo shape). Linux or WSL2 only. Setup: docs/LLD.md §12, AGENTS.md "Run it".
 #
-#   cp .env.example .env            # then edit it
-#   python scripts/dev_genesis.py --out dev --addrs compose --profile demo \
-#       --repo https://github.com/<org>/<repo> --image golang@sha256:<amd64 digest>
-#   docker compose up -d --build
-#   docker compose run --rm cli release --repo ... --tag ... --commit ... --key /etc/matrix/keys/release.key
+#   cp .env.example .env            # then edit it; COMPOSE_PROFILES there must match --nodes
+#   docker pull --platform linux/amd64 golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
+#   python scripts/dev_genesis.py --out dev --addrs compose --profile demo --nodes 8 \
+#       --repo https://github.com/ChaoticNebula5/matrix-hello \
+#       --image golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
+#   docker compose up -d --build    # builder1..8 with COMPOSE_PROFILES=eight, builder1..4 without
+#   docker compose run --rm cli release --repo https://github.com/ChaoticNebula5/matrix-hello \
+#       --tag v1.2.0 --commit fb6881c6e2432fa107ef809af109a9a1344ed2c0 \
+#       --key /etc/matrix/keys/release.key --wait 600 --out dist/
 #   docker compose run --rm cli tui
+#
+# Not for the laptop demo: there every laptop runs `matrix up` natively (docs/OPS.md, DEMO.md) and
+# Docker only runs the builds. A containerized node cannot do discovery on Docker Desktop, whose
+# network is its own VM (192.168.65.x), not the laptop's hotspot address.
+#
+# Build logs are served to loopback callers only (RFC D29), so neither the host port nor the cli
+# container can read them. Read builderN's log from inside its own container:
+#   docker compose exec builderN python -c "import urllib.request,sys; \
+#       sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:7700/v1/requests/<id>/log').read().decode())"
 name: matrix
 
 x-builder: &builder
@@ -50,19 +63,23 @@ services:
   # laptopC
   builder5:
     <<: *builder
+    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder5, --key, /etc/matrix/keys/builder5.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder5"]
     ports: ["127.0.0.1:7704:7700"]
   builder6:
     <<: *builder
+    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder6, --key, /etc/matrix/keys/builder6.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder6"]
     ports: ["127.0.0.1:7705:7700"]
   # laptopD
   builder7:
     <<: *builder
+    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder7, --key, /etc/matrix/keys/builder7.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder7"]
     ports: ["127.0.0.1:7706:7700"]
   builder8:
     <<: *builder
+    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder8, --key, /etc/matrix/keys/builder8.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder8"]
     ports: ["127.0.0.1:7707:7700"]
 
@@ -75,6 +92,7 @@ services:
     working_dir: /work
     environment:
       MATRIX_GENESIS: /etc/matrix/genesis.json
+      MATRIX_NODE: builder1:7700  # the cli's "local builder" (laptopA)
     volumes:
       - ./dev/genesis.json:/etc/matrix/genesis.json:ro
       - ./dev/keys/release.key:/etc/matrix/keys/release.key:ro

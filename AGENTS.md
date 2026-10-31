@@ -76,9 +76,9 @@ Agents must not guess these. Fill the table in the first 30 minutes and commit i
 | # | Decision | Owner | Value |
 |---|---|---|---|
 | H1 | Names for `TBD-A..D` | all | TBD |
-| H2 | GitHub org that hosts the sample repo | B | TBD (placeholder `<org>`) |
-| H3 | Sample repo URL (§10) | B | `https://github.com/<org>/matrix-hello` |
-| H4 | Go toolchain image: `golang:1.23`, pinned `linux/amd64` digest | B | `golang@sha256:TBD` |
+| H2 | GitHub org that hosts the sample repo | B | `ChaoticNebula5` |
+| H3 | Sample repo URL (§10) | B | `https://github.com/ChaoticNebula5/matrix-hello` (built by `scripts/make_sample_repo.sh`; tag commits in §10) |
+| H4 | Go toolchain image: `golang:1.23`, pinned `linux/amd64` digest | B | `golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689` (1.23.12-bookworm; in `network.toml`) |
 | H5 | Measured `build_timeout_s` (one build at a time per laptop, RFC §9.1) | B | TBD (default 150 full / 45 demo) |
 | H6 | Laptops and builders | C | 4 laptops, one builder each (n = 4, f = 1). Builder id = operator = the laptop's hostname via `matrix up` (or `--name`). Addresses discovered by signed hellos; no fixed IPs. Laptop A is also the publisher (HLD §5.1) |
 | H7 | Venue network plan and fallback | C | Phone hotspot, plain LAN (UDP 7788, TCP 7700). tinc / WireGuard optional, for privacy only. Fallback: another phone or a travel router |
@@ -301,13 +301,26 @@ A tag can be released only once (`request_id` = hash of repo, commit and tag), s
 | Tag | Purpose (RFC rev 5 §9.2 scenes) | Expected result |
 |---|---|---|
 | (none) | Scene 1: zero-config founding with `matrix up`; scene 4: imposter on the hotspot | 4 builders online; rogue messages rejected |
-| `v1.2.0` | Scene 2: happy path | `CERTIFIED`, hash `TBD` |
+| `v1.2.0` | Scene 2: happy path | `CERTIFIED`, hash `e432bbc584446abcbd1493a1bf29918ac2e2eb59de76bf70ee130a1d093fd1f5` (6 of 8 compose builders agreed) |
 | `v1.2.1` | Scene 3: SolarWinds (`inject` on laptop C); scene 5: swapped download uses its backdoored binary, and an older tag's certificate | `CERTIFIED`, honest hash `TBD`; backdoored hash (with `backdoor.patch`) `TBD` |
 | `v1.2.2` | Scene 6: a laptop drops off | `CERTIFIED` with 3 of 4, hash `TBD` |
 | `v1.2.3` | Scene 7: caught cheater (`equivocate` on laptop B) | `CERTIFIED`, `EQUIVOCATION` evidence, hash `TBD` |
 | `v1.2.4`, `v1.2.5` | Spare tags for rehearsals and re-runs | `CERTIFIED`, hashes `TBD` |
 | `v0.9.0-broken` | Compile error | `BUILD_FAILED` (exit 5) |
 | `v0.9.1-norecipe` | No `matrix.toml` | stays `PENDING` (exit 3) |
+
+Tag commits of the built repo (pass them as `matrix release --commit`):
+
+```
+v1.2.0           fb6881c6e2432fa107ef809af109a9a1344ed2c0
+v1.2.1           b6d0e50f81354fae2fe92dc9b92869069d1e62f7
+v1.2.2           26adb4c7e2d1d21018ca3f55c28d7c09faefad39
+v1.2.3           45350d0028ef952edd4e30d56bbc51be03310cc8
+v1.2.4           8507b792c74d1ac399e6ef5697104bfe1feb5bd6
+v1.2.5           216fa9ef4f611d3be04d08fb7bd0d51678194952
+v0.9.0-broken    fca4dc4909fbcd96f6cb77f0fe65b552effb509a
+v0.9.1-norecipe  87206061e8e5be42a67edeffc2a28694debdd5cb
+```
 
 `examples/faults/backdoor.patch` is a `git apply` patch against `cmd/hello/main.go` that applies cleanly to every `v1.2.x` tag and adds a visible extra line, for example `fmt.Println("backdoor active")`. Record the honest hash of every tag (and the backdoored hash of `v1.2.1`) as soon as B1 measures them; D5 needs them.
 
@@ -458,4 +471,4 @@ docker compose run --rm cli tui
 
 Without Docker Compose: `python scripts/dev_genesis.py --addrs local ...` and start 8 `matrix-node` processes on `127.0.0.1:7700–7707` (or use `tests/integration/harness.py` from C6).
 
-Demo faults: edit [docker-compose.faults.yml](docker-compose.faults.yml), then `docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builderN`. Never more than f malicious builders at once (2 in the 8-builder compose network; 1 with `dev_genesis.py --nodes 4`).
+Demo faults: edit [docker-compose.faults.yml](docker-compose.faults.yml), then `docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builderN`. Never more than f malicious builders at once (2 in the 8-builder compose network; 1 with `dev_genesis.py --nodes 4`). For `--nodes 4`, clear `COMPOSE_PROFILES` in `.env` so only builder1..4 start.
