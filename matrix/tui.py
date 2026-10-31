@@ -1,8 +1,9 @@
 """Textual TUI: Builders, Releases, Detail, Evidence (RFC §7.12, LLD §3.14).
 
 Talks to builders over the HTTP API only and never opens the database. Every second it polls
-the chosen node and each builder's /v1/health, runs verdict() locally on what it fetched, and
-keeps nothing beyond the last poll result.
+the laptop's own builder (--node, loopback by default: the only place its build log is served),
+the verified hellos it knows (/v1/peers) and each builder's /v1/health, runs verdict() locally on
+what it fetched, and keeps nothing beyond the last poll result.
 """
 
 import asyncio
@@ -15,7 +16,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -23,7 +24,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Static
 
-from .cli import CLIENT, builder_rows, check_proof
+from .cli import CLIENT, ClientBook, builder_rows, check_proof, refresh
+from .discovery import AddressBook
 from .genesis import Genesis
 from .model import parse_envelope, request_id
 from .net import PeerClient
@@ -397,9 +399,19 @@ class MatrixTui(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, g: Genesis, node_id: str, peers: PeerClient | None = None):
+    def __init__(
+        self,
+        g: Genesis,
+        local: str,
+        peers: PeerClient | None = None,
+        local_id: str | None = None,
+        book: ClientBook | None = None,
+    ):
         super().__init__()
-        self.g, self.node_id = g, node_id
+        self.g, self.local = g, local
+        self.node_id = local_id  # the local builder's genesis id, from its /v1/health
+        self.book = book
+        self._own = peers is None  # real client: refresh the book from --node every poll
         self.view = "builders"
         self.detail_id: str | None = None
         self.show_log = False
@@ -427,12 +439,9 @@ class MatrixTui(App):
         yield Footer(show_command_palette=False, compact=True)
 
     async def on_mount(self) -> None:
-        node = self.g.node(self.node_id)
-        self.query_one(
-            "#dashboard", Vertical
-        ).border_title = f"MATRIX · {node.operator} · {self.node_id}"
         if self.peers is None:
-            self.peers = PeerClient(self.g, CLIENT)
+            self.book = ClientBook(self.g, self.local)
+            self.peers = PeerClient(self.g, CLIENT, self.book)
         self.set_interval(1.0, self.poll)
         await self.poll()
         self.query_one("#table", DataTable).focus()
@@ -446,12 +455,19 @@ class MatrixTui(App):
             return  # a slow builder must not stack up overlapping polls
         self._busy = True
         try:
-            self.health, self.releases, self.evidence = await asyncio.gather(
-                poll_health(self.peers, self.g),
-                poll_releases(self.peers, self.g, self.node_id),
-                poll_evidence(self.peers, self.node_id),
-            )
-            if self.view == "detail" and self.show_log and self.detail_id:
+            if self._own:
+                await refresh(self.peers, self.book)
+                self.node_id = self.book.local_id
+            if self.node_id is None:  # no builder answers at --node: show the peers only
+                self.health = await poll_health(self.peers, self.g)
+                self.releases, self.evidence = [], []
+            else:
+                self.health, self.releases, self.evidence = await asyncio.gather(
+                    poll_health(self.peers, self.g),
+                    poll_releases(self.peers, self.g, self.node_id),
+                    poll_evidence(self.peers, self.node_id),
+                )
+            if self.node_id and self.view == "detail" and self.show_log and self.detail_id:
                 self.extra = await poll_log(self.peers, self.node_id, self.detail_id)
         finally:
             self._busy = False
@@ -465,7 +481,7 @@ class MatrixTui(App):
         self.query_one("#peers" if view == "builders" else "#table", DataTable).focus()
 
     async def action_toggle_log(self) -> None:
-        if self.view != "detail" or self.detail_id is None or self.peers is None:
+        if self.view != "detail" or None in (self.detail_id, self.peers, self.node_id):
             return
         self.show_log = not self.show_log
         self.extra = (
@@ -511,7 +527,16 @@ class MatrixTui(App):
         else:
             self.query_one("#requests-title", Static).update("REQUESTS")
             self._render_releases(table)
-        self.query_one("#peers-title", Static).update(f"PEERS ({len(self.g.nodes)})")
+        online = sum(self._online(n.id) for n in self.g.nodes)
+        self.query_one("#peers-title", Static).update(
+            f"PEERS ({len(self.g.nodes)}) · {online} online"
+        )
+        node = self.g.node(self.node_id) if self.node_id else None
+        self.query_one("#dashboard", Vertical).border_title = (
+            f"MATRIX · {node.operator} · {node.id}"
+            if node
+            else f"MATRIX · no builder at {self.local} (start `matrix up`, or pass --node)"
+        )
         if table.row_count:
             table.move_cursor(row=min(row, table.row_count - 1))
         self._update_detail()
@@ -522,20 +547,33 @@ class MatrixTui(App):
         split = self.query_one("#peers-panel", Vertical).size.width
         self.query_one("#divider", Static).update(_divider(width, split))
 
+    def _online(self, node_id: str) -> bool:
+        # With hellos (a founded network), online means a fresh signed hello; with static dev
+        # addresses, that /v1/health answered. Offline members stay listed: disconnect != leave.
+        if self.book is not None and self.book.peers_now is not None:
+            return self.book.online(node_id)
+        return self.health.get(node_id) is not None
+
+    def _address(self, node: Any) -> str:
+        hello = AddressBook.addr(self.book, node.id) if self.book is not None else None
+        return hello or node.addr or "-"  # the LAN address from its hello, not the loopback
+
     def _render_builders(self, t: DataTable) -> None:
-        t.add_columns("node", "operator", "status", "genesis")
+        t.add_columns("node", "operator", "status", "genesis", "address")
         for n in sorted(self.g.nodes, key=lambda n: n.operator):
             h = self.health.get(n.id)
+            up = self._online(n.id)
             match = (
                 h is not None and h.get("genesis_hash") == self.g.hash and h.get("node_id") == n.id
             )
             t.add_row(
                 n.id,
                 n.operator,
-                _styled("● UP" if h else "○ DOWN", "green" if h else "red"),
+                _styled("● UP" if up else "○ DOWN", "green" if up else "red"),
                 _styled(
                     "✓" if match else "?" if h is None else "!", "green" if match else "yellow"
                 ),
+                _styled(self._address(n), "muted"),
                 key=n.id,
             )
 
@@ -624,13 +662,13 @@ class MatrixTui(App):
         return "Enter: proof JSON"
 
 
-def run_tui(g: Genesis, node_id: str) -> int:
+def run_tui(g: Genesis, local: str) -> int:
     if sys.stdin.isatty() and sys.stdout.isatty():
         try:
             curses.wrapper(_intro)  # wrapper restores terminal modes before Textual starts.
         except (curses.error, OSError):
             pass  # A terminal without curses support can still run the dashboard.
-    MatrixTui(g, node_id).run()
+    MatrixTui(g, local).run()
     return 0
 
 

@@ -16,6 +16,7 @@ from matrix.tui import (
 )
 
 H = "a" * 64
+LOCAL = "127.0.0.1:7700"
 OTHER = "e" * 64
 
 
@@ -218,7 +219,7 @@ def _text(app: MatrixTui, wid: str) -> str:
 
 
 async def test_three_box_dashboard_and_shortcuts(peers, genesis, rid):
-    app = MatrixTui(genesis, "builder1", peers=peers)
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1")
     async with app.run_test(size=(110, 30)) as pilot:
         await pilot.pause()
         left, right, bottom = (
@@ -234,9 +235,10 @@ async def test_three_box_dashboard_and_shortcuts(peers, genesis, rid):
         rows = _cells(app, "#peers")
         assert len(rows) == 8
         by_id = {r[0]: r for r in rows}
-        assert by_id["builder1"][1:] == ["laptopA", "● UP", "✓"]
+        assert by_id["builder1"][1:] == ["laptopA", "● UP", "✓", "127.0.0.1:7700"]
         assert by_id["builder6"][3] == "!"
-        assert by_id["builder8"][2:] == ["○ DOWN", "?"]
+        assert by_id["builder8"][2:] == ["○ DOWN", "?", "127.0.0.1:7707"]
+        assert "laptopA · builder1" in str(app.query_one("#dashboard").border_title)
         [request] = _cells(app)
         assert rid[:8] in request[0] and "hello@v1.2.0" in request[0]
         assert "ATTESTED" in request[0]
@@ -276,7 +278,7 @@ async def test_selected_release_updates_details_and_resizes(peers, genesis, rele
     peers.responses["builder1"][f"/v1/requests/{other_id}"] = {"request": other}
     peers.responses["builder1"][f"/v1/requests/{other_id}/bundle"] = {"envelopes": []}
 
-    app = MatrixTui(genesis, "builder1", peers=peers)
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1")
     async with app.run_test(size=(50, 14)) as pilot:
         await pilot.press("r", "down")
         assert other_id[:8] in _text(app, "#details-title")
@@ -300,7 +302,7 @@ async def test_evidence_disagree_single_vote_is_unverified(peers, genesis, rid):
             "proof": [signed_vote],
         }
     ]
-    app = MatrixTui(genesis, "builder1", peers=peers)
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1")
     async with app.run_test() as pilot:
         await pilot.press("e")
         [row] = _cells(app)
@@ -309,10 +311,35 @@ async def test_evidence_disagree_single_vote_is_unverified(peers, genesis, rid):
         assert "proof (unverified)" in _text(app, "#extra")
 
 
-async def test_cli_tui_rejects_unknown_node(tmp_path, genesis_dict):
+async def test_cli_tui_rejects_a_bad_node_address(tmp_path, genesis_dict):
     from matrix.canon import canonical_json
     from matrix.cli import run
 
     path = tmp_path / "g.json"
     path.write_bytes(canonical_json(genesis_dict))
-    assert run(["--genesis", str(path), "tui", "--node", "nobody"]) == 4
+    assert run(["--genesis", str(path), "--node", "nobody", "tui"]) == 4
+
+
+async def test_builders_online_from_signed_hellos(peers, genesis, keys):
+    # A founded network: online means a fresh signed hello, and the address is the LAN one from
+    # the hello. builder6 still answers /v1/health but its last hello is 20 s old: offline.
+    import time
+
+    from matrix.cli import ClientBook
+    from matrix.discovery import make_hello
+
+    book = ClientBook(genesis, LOCAL)
+    now = time.time()
+    book.peers_now = now
+    for i in range(1, 7):
+        nid = f"builder{i}"
+        seq = int((now - (20 if nid == "builder6" else 1)) * 1000)
+        book.accept(make_hello(genesis, genesis.node(nid), keys[nid], f"192.168.43.{i}:7700", seq))
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1", book=book)
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        by_id = {r[0]: r for r in _cells(app, "#peers")}
+        assert by_id["builder2"][2] == "● UP" and by_id["builder2"][4] == "192.168.43.2:7700"
+        assert by_id["builder6"][2] == "○ DOWN"  # stale hello, even though health answers
+        assert by_id["builder7"][2] == "○ DOWN"  # never heard from: still listed (not left)
+        assert "5 online" in _text(app, "#peers-title")
