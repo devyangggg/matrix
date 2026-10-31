@@ -96,6 +96,6 @@ services:
     volumes:
       - ./dev/genesis.json:/etc/matrix/genesis.json:ro
       - ./dev/keys/release.key:/etc/matrix/keys/release.key:ro
-      - ./dist:/work/dist
+      - ${MATRIX_DIST:-./dist}:/work/dist  # .env: MATRIX_DIST for a checkout on a Windows drive
     stdin_open: true
     tty: true
