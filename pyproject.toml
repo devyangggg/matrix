@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "matrix"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pynacl>=1.5",
+    "aiohttp>=3.9",
+    "textual>=0.60",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[project.scripts]
+matrix-node = "matrix.node:main"
+matrix = "matrix.cli:main"
+
+[tool.setuptools]
+packages = ["matrix"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["integration: needs Docker and network"]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

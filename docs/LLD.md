@@ -490,6 +490,10 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L11 | `ruff` (lint + format, line length 100) is the only extra dev tool |
 | L12 | Deterministic test keys: seed = `sha256(b"matrix-test:" + id)`; golden vectors in `tests/vectors/` |
 | L13 | Real genesis keys are generated on each laptop with `matrix keygen`; only public keys are collected |
+| L14 | `SIG_PREFIX` is defined in `crypto.py` (it signs, and `model` imports `crypto`); `model.SIG_PREFIX` re-exports it |
+| L15 | `Engine.on_request` returns 403 when the signer is not a release signer **or** `repo_url` is not in `allowed_repos` (RFC §7.9 / openapi), 400 for other invalid envelopes. LLD §3.9 step 1 only named the signer case |
+| L16 | `Engine.fault` is a public attribute; `net` reads `engine.fault.corrupt_artifacts` for `bad-artifact` (`make_app` has no fault parameter) |
+| L17 | `Engine.on_request` also returns 413 for a body over 4096 bytes (same as `on_attest` over 1024); `net` enforces the limit too |
 
 ## 11. Tests
 
