@@ -1,0 +1,49 @@
+# Publisher CI (RFC §7.11): on a tag push, get the release certified by the Matrix network and
+# upload the binary and its certificate. Copy to .github/workflows/ in the Go project's repo.
+#
+# The runner must be on the builder mesh (tinc), so this is a self-hosted runner. It holds a
+# release-signer key whose public key is in genesis. Only exit code 0 means CERTIFIED; anything
+# else fails the job, and nothing is uploaded (fail closed).
+#
+# Setup:
+#   secrets.MATRIX_RELEASE_KEY  the release signer's key file content (64 hex)
+#   genesis.json                checked into this repo next to the workflow, or on the runner
+name: matrix-release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # gh release upload
+
+jobs:
+  release:
+    runs-on: [self-hosted, matrix-mesh]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install matrix
+        run: pip install "git+https://github.com/ChaoticNebula5/Matrix@main"
+
+      - name: Certify
+        env:
+          MATRIX_GENESIS: ${{ github.workspace }}/genesis.json
+          MATRIX_RELEASE_KEY: ${{ secrets.MATRIX_RELEASE_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/release.key"
+          printf '%s\n' "$MATRIX_RELEASE_KEY" > "$key"
+          trap 'rm -f "$key"' EXIT
+          matrix release \
+            --repo "https://github.com/${GITHUB_REPOSITORY}" \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --key "$key" --wait 600 --out dist/ --output hello
+
+      - name: Upload binary and certificate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --notes "Certified by Matrix" || true
+          gh release upload "$GITHUB_REF_NAME" dist/hello dist/hello.matrix.json --clobber
