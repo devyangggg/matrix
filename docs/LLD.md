@@ -490,6 +490,7 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L11 | `ruff` (lint + format, line length 100) is the only extra dev tool |
 | L12 | Deterministic test keys: seed = `sha256(b"matrix-test:" + id)`; golden vectors in `tests/vectors/` |
 | L13 | Real genesis keys are generated on each laptop with `matrix keygen`; only public keys are collected |
+| L14 | `SIG_PREFIX` is defined in `crypto.py` (it signs, and `model` imports `crypto`); `model.SIG_PREFIX` re-exports it |
 
 ## 11. Tests
 

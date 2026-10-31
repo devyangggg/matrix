@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 from typing import Any
 
+from .crypto import SIG_PREFIX  # noqa: F401  (defined in crypto for layering; re-exported here)
 from .genesis import Genesis
 
 PROTOCOL_V = 1
-SIG_PREFIX = b"matrix/v1\0"
 MAX_RELEASE_ENV = 4096
 MAX_ATTEST_ENV = 1024
 MAX_RECIPE = 4096
