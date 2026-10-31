@@ -28,6 +28,17 @@ def _reject_nonfinite(_: str) -> None:
     raise ValueError("nonfinite JSON constant")
 
 
+async def _read_capped(stream: Any, limit: int) -> bytes | None:
+    """The whole body, or None if it exceeds `limit`. `StreamReader.read(n)` returns as soon as
+    *some* data arrived, so a single read can silently truncate a multi-chunk body."""
+    data = bytearray()
+    async for chunk in stream.iter_chunked(65536):
+        data += chunk
+        if len(data) > limit:
+            return None
+    return bytes(data)
+
+
 def _error(code: str, status: int) -> web.Response:
     return web.json_response({"error": code, "detail": code.replace("_", " ")}, status=status)
 
@@ -54,7 +65,9 @@ def _row_envelope(row: Any) -> dict:
     return json.loads(row["envelope"])
 
 
-def make_app(engine: Any, store: Any, g: Any, me: Any, env: Any) -> web.Application:
+def make_app(
+    engine: Any, store: Any, g: Any, me: Any, env: Any, book: Any = None
+) -> web.Application:
     app = web.Application(client_max_size=4096)
     clock = getattr(engine, "clock", time.time)
 
@@ -69,15 +82,15 @@ def make_app(engine: Any, store: Any, g: Any, me: Any, env: Any) -> web.Applicat
         )
 
     async def submit(request: web.Request) -> web.Response:
-        raw = await request.content.read(4097)
-        if len(raw) > 4096:
+        raw = await _read_capped(request.content, 4096)
+        if raw is None:
             return _error("too_large", 413)
         status, body = await engine.on_request(raw)
         return web.json_response(body, status=status)
 
     async def message(request: web.Request) -> web.Response:
-        raw = await request.content.read(1025)
-        if len(raw) > 1024:
+        raw = await _read_capped(request.content, 1024)
+        if raw is None:
             return _error("too_large", 413)
         status, body = await engine.on_attest(raw, request.headers.get("X-Matrix-From"))
         return web.json_response(body, status=status)
@@ -169,6 +182,10 @@ def make_app(engine: Any, store: Any, g: Any, me: Any, env: Any) -> web.Applicat
             items.append(item)
         return web.json_response({"now": clock(), "evidence": items})
 
+    async def peers_route(request: web.Request) -> web.Response:
+        # Signed hellos only; clients re-verify every one against genesis before using it.
+        return web.json_response({"now": clock(), "hellos": book.hellos() if book else []})
+
     app.router.add_get("/v1/health", health)
     app.router.add_post("/v1/requests", submit)
     app.router.add_get("/v1/requests", requests)
@@ -178,21 +195,27 @@ def make_app(engine: Any, store: Any, g: Any, me: Any, env: Any) -> web.Applicat
     app.router.add_post("/v1/messages", message)
     app.router.add_get("/v1/artifacts/{sha256}", artifact)
     app.router.add_get("/v1/evidence", evidence)
+    app.router.add_get("/v1/peers", peers_route)
     return app
 
 
 class PeerClient:
     """One session per node; pushes never block request admission."""
 
-    def __init__(self, g: Any, me: Any):
+    def __init__(self, g: Any, me: Any, book: Any = None):
         self.g = g
         self.me = me
+        self.book = book  # discovery.AddressBook: verified hello addresses (RFC rev 5 §7.15)
         self.session = ClientSession(timeout=ClientTimeout(total=HTTP_TIMEOUT_S))
         self.tasks: set[asyncio.Task] = set()
 
     def _url(self, node_id: str, path: str) -> str | None:
         node = self.g.node(node_id)
-        return f"http://{node.addr}{path}" if node is not None and node.id != self.me.id else None
+        if node is None or node.id == self.me.id:
+            return None
+        # Read on every call, so a new DHCP address is used as soon as its hello arrives.
+        addr = (self.book.addr(node_id) if self.book is not None else None) or node.addr
+        return f"http://{addr}{path}" if addr else None
 
     async def _post(self, node_id: str, path: str, envelope: dict) -> None:
         url = self._url(node_id, path)
@@ -240,8 +263,8 @@ class PeerClient:
             async with self.session.get(url) as response:
                 if response.status != 200:
                     return None
-                data = await response.content.read(1024 * 1024 + 1)
-                if len(data) > 1024 * 1024:
+                data = await _read_capped(response.content, 1024 * 1024)
+                if data is None:
                     return None
                 return json.loads(
                     data,
@@ -260,8 +283,7 @@ class PeerClient:
             async with self.session.get(url) as response:
                 if response.status != 200:
                     return None
-                data = await response.content.read(limit + 1)
-                return data if len(data) <= limit else None
+                return await _read_capped(response.content, limit)
         except (ClientError, OSError, TimeoutError, ValueError):
             return None
 
