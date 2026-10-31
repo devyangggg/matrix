@@ -399,9 +399,11 @@ async def build(
                 rerun_rc, _, rerun_err, rerun_truncated = await _run(argv, log, container=names[2])
             # A truncated prefix cannot establish a deterministic compile error: the omitted
             # suffix may contain an environmental marker or a difference between attempts.
-            if not truncated and not rerun_truncated and classify_go_build(
-                rc, err, rerun_rc, rerun_err, work
-            ) == "FAILED":
+            if (
+                not truncated
+                and not rerun_truncated
+                and classify_go_build(rc, err, rerun_rc, rerun_err, work) == "FAILED"
+            ):
                 return Outcome("FAILED", "FAILED", None, "deterministic compile error")
             raise _Stop("ERROR", f"go build failed (rc={rc}): {err.strip()[:200]}")
 
@@ -418,7 +420,7 @@ async def build(
                     await asyncio.shield(copy_task)
                 except asyncio.CancelledError:
                     continue
-                except Exception:
+                except Exception:  # noqa: BLE001  copy failure must not mask cancellation
                     break
             if not copy_task.cancelled():
                 copy_task.exception()  # consume an I/O error without masking cancellation

@@ -98,6 +98,7 @@ async def test_poll_releases_rejects_bad_signature(peers, genesis, rid):
     [r] = await poll_releases(peers, genesis, "builder1")
     assert r.body is None and r.verdict.state == "INVALID"
 
+
 async def test_poll_releases_unreachable_or_garbage(peers, genesis):
     assert await poll_releases(peers, genesis, "builder8") == []
     peers.responses["builder1"]["/v1/requests?since=0"] = {"requests": "nope"}

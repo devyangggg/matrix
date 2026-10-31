@@ -214,6 +214,7 @@ async def test_peer_json_rejects_oversize_duplicates_and_nonfinite():
     }
     app = web.Application()
     for name, body in responses.items():
+
         async def reply(request, payload=body):
             return web.Response(body=payload, content_type="application/json")
 

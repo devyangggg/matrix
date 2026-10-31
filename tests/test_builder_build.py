@@ -26,6 +26,7 @@ ldflags = "-s -w"
 output = "hello"
 """
 COMPILE_ERR = "# hello\n./main.go:5:2: undefined: x\n"
+REAL_RUN = b._run  # capture the real subprocess runner before the script fixture replaces it
 
 
 class Script:
@@ -212,6 +213,7 @@ async def test_environmental_build_failures_abstain_without_a_rerun(genesis, env
     out = await b.build(REQ, RID, genesis, env, 0)
     assert out.kind == "ERROR" and "build-r" not in script.steps() and no_work_dir(env)
 
+
 @pytest.mark.parametrize("truncated_step", ["build", "build-r"])
 async def test_truncated_real_build_stderr_abstains_even_with_a_marker_past_the_cap(
     genesis, env, script, monkeypatch, truncated_step
@@ -219,7 +221,6 @@ async def test_truncated_real_build_stderr_abstains_even_with_a_marker_past_the_
     monkeypatch.setattr(b, "MAX_LOG", 128)
     prefix = COMPILE_ERR.encode() + b"." * (b.MAX_LOG - len(COMPILE_ERR.encode()))
     marker = b"\ngo: signal: killed"
-    real_run = b._run
     captured = []
 
     async def run_with_real_build_output(argv, log, *, container=None, env=None):
@@ -229,7 +230,7 @@ async def test_truncated_real_build_stderr_abstains_even_with_a_marker_past_the_
         script.calls.append(argv)
         payload = prefix + marker if step == truncated_step else prefix
         code = f"import sys; sys.stderr.buffer.write({payload!r}); sys.exit(1)"
-        result = await real_run([sys.executable, "-c", code], log)
+        result = await REAL_RUN([sys.executable, "-c", code], log)
         captured.append((step, result[2], result[3]))
         return result
 
@@ -298,6 +299,7 @@ async def test_timeout_removes_the_work_dir_and_propagates(genesis, env, script)
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(b.build(REQ, RID, genesis, env, 0), 0.2)
     assert no_work_dir(env)
+
 
 @pytest.mark.parametrize("timeout", [False, True])
 async def test_cancel_during_artifact_copy_joins_worker_before_cleanup_and_retry(

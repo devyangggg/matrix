@@ -67,12 +67,8 @@ async def poll_releases(peers: PeerClient, g: Genesis, node_id: str) -> list[Rel
     ]
     items = sorted(items, key=lambda i: i["received_at"], reverse=True)[:MAX_RELEASES]
     requests, bundles = await asyncio.gather(
-        asyncio.gather(
-            *(peers.get_json(node_id, f"/v1/requests/{i['id']}") for i in items)
-        ),
-        asyncio.gather(
-            *(peers.get_json(node_id, f"/v1/requests/{i['id']}/bundle") for i in items)
-        ),
+        asyncio.gather(*(peers.get_json(node_id, f"/v1/requests/{i['id']}") for i in items)),
+        asyncio.gather(*(peers.get_json(node_id, f"/v1/requests/{i['id']}/bundle") for i in items)),
     )
     out = []
     for i, r, b in zip(items, requests, bundles):

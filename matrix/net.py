@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
-from matrix.canon import _no_dup_pairs
+
+from .canon import _no_dup_pairs
 
 HTTP_TIMEOUT_S = 3
 _HEX64 = r"[0-9a-f]{64}"
