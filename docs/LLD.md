@@ -9,7 +9,7 @@
 ## 0. Conventions
 
 - Python 3.11+, `asyncio` everywhere in the daemon. Type hints on every public function.
-- Runtime dependencies: `pynacl`, `aiohttp`, `textual`. Dev: `pytest`, `pytest-asyncio`. **Nothing else.**
+- Runtime dependencies: `pynacl`, `aiohttp`, `textual`. Dev: `pytest`, `pytest-asyncio`, `ruff`. **Nothing else.**
 - Plain functions and frozen `@dataclass`es. Write a class only when it holds state (`Store`, `Engine`, `PeerClient`).
 - Parsers and `verdict()` **never raise**. They return `None` or a `Verdict`. Wrap the body in `try/except Exception: return None` as a last line of defence, but validate explicitly first.
 - Regexes always use `re.fullmatch(..., re.ASCII)`.
@@ -33,7 +33,7 @@ genesis.json  genesis.demo.json
 Dockerfile  docker-compose.yml  docker-compose.faults.yml  .env.example
 ```
 
-`pyproject.toml` optional dependency group `dev = ["pytest", "pytest-asyncio"]`.
+Exact `pyproject.toml`: [AGENTS.md §8.1](../AGENTS.md). Shared test kit (`tests/conftest.py`, `tests/fakes.py`, `tests/vectors/`): [AGENTS.md §5.3](../AGENTS.md).
 
 ## 2. Constants
 
@@ -487,6 +487,9 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L8 | `lie`, `collude` and `stall` skip the build entirely |
 | L9 | CLI genesis path from `--genesis`, then `$MATRIX_GENESIS`, then `~/.matrix/genesis.json` |
 | L10 | Requests dequeued after settlement are not built (phase `MISSED`, reason `settled`) |
+| L11 | `ruff` (lint + format, line length 100) is the only extra dev tool |
+| L12 | Deterministic test keys: seed = `sha256(b"matrix-test:" + id)`; golden vectors in `tests/vectors/` |
+| L13 | Real genesis keys are generated on each laptop with `matrix keygen`; only public keys are collected |
 
 ## 11. Tests
 
