@@ -57,7 +57,7 @@ _INTRO_SECONDS = 2.0
 def _intro_colors() -> dict[str, int]:
     """Curses uses the nearest palette colours; Textual uses truecolour when available."""
     if not curses.has_colors():
-        return dict.fromkeys(("purple", "green", "muted", "fade1", "fade2", "text"), 0)
+        return dict.fromkeys(("purple", "green", "muted", "fade1", "fade2", "text", "blue"), 0)
     curses.start_color()
     try:
         curses.use_default_colors()
@@ -71,13 +71,14 @@ def _intro_colors() -> dict[str, int]:
         (249, curses.COLOR_WHITE),
         (252, curses.COLOR_WHITE),
         (255, curses.COLOR_WHITE),
+        (69, curses.COLOR_BLUE),  # nearest 256-colour match to dashboard #4287f5
     )
     for pair, (indexed, basic) in enumerate(palette, 1):
         curses.init_pair(pair, indexed if curses.COLORS >= 256 else basic, background)
     return dict(
         zip(
-            ("purple", "green", "muted", "fade1", "fade2", "text"),
-            (curses.color_pair(i) for i in range(1, 7)),
+            ("purple", "green", "muted", "fade1", "fade2", "text", "blue"),
+            (curses.color_pair(i) for i in range(1, 8)),
         )
     )
 
@@ -97,7 +98,7 @@ def _intro_frame(win: curses.window, elapsed: float, colors: dict[str, int]) -> 
     win.erase()
     if cols < 42 or rows < 10:
         label = "[ MATRIX ]"
-        _put(win, rows // 2, max(0, (cols - len(label)) // 2), label, colors["purple"])
+        _put(win, rows // 2, max(0, (cols - len(label)) // 2), label, colors["blue"])
         return
 
     sx, sy = (2 if cols >= 84 else 1), (2 if rows >= 20 else 1)
@@ -145,7 +146,7 @@ def _intro_frame(win: curses.window, elapsed: float, colors: dict[str, int]) -> 
         for col, cell in enumerate(line):
             if cell != "█" or abs(col - (width - 1) / 2) > radius:
                 continue
-            attr = colors["purple"]
+            attr = colors["blue"]
             if (elapsed < 1.12 and abs(abs(col - (width - 1) / 2) - radius) < 1.5) or (
                 1.12 <= elapsed < 1.48 and abs(col - shimmer) < 2
             ):

@@ -50,7 +50,7 @@ class IntroWindow:
         pass
 
 
-INTRO_COLORS = {"purple": 1, "green": 2, "muted": 3, "fade1": 4, "fade2": 5, "text": 6}
+INTRO_COLORS = {"purple": 1, "green": 2, "muted": 3, "fade1": 4, "fade2": 5, "text": 6, "blue": 7}
 
 
 def test_intro_four_phases_and_small_terminal_bounds():
@@ -61,6 +61,7 @@ def test_intro_four_phases_and_small_terminal_bounds():
             assert win.cells
             if rows < 10 or cols < 42:
                 assert "".join(cell[2] for cell in win.cells) == "[ MATRIX ]"[:cols]
+                assert all(cell[3] == INTRO_COLORS["blue"] for cell in win.cells)
                 continue
             drawn = "".join(cell[2] for cell in win.cells)
             if elapsed == 0:
@@ -70,6 +71,9 @@ def test_intro_four_phases_and_small_terminal_bounds():
             if elapsed == 1.32:
                 assert "RELEASE" not in drawn  # tagline is spaced, not a logo letter
                 assert "R E L E A S E" in drawn
+                assert any(
+                    "█" in text and attr == INTRO_COLORS["blue"] for _, _, text, attr in win.cells
+                )
             if elapsed == 1.9:
                 assert "▒" in drawn or "░" in drawn
 
