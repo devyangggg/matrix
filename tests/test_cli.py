@@ -378,7 +378,21 @@ def test_evidence_dedupes_and_checks_proof(net, capsys):
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("EQUIVOCATION")]
     assert len(lines) == 2
     assert "builder2" in lines[0] and "proof-ok" in lines[0]
-    assert "builder6" in lines[1] and "no-proof" in lines[1]
+    assert "builder6" in lines[1] and "unverified" in lines[1]
+
+
+@pytest.mark.parametrize("kind", ["DISAGREE", "STALL", "UNKNOWN"])
+def test_signed_single_vote_does_not_prove_evidence(net, capsys, kind):
+    item = {
+        "kind": kind,
+        "signer": "builder2",
+        "request_id": RID,
+        "proof": [net.att("builder2", H)],
+    }
+    assert not cli.check_proof(item, net.g)
+    net.node("builder1").evidence = [item]
+    assert net.run("evidence") == 0
+    assert "unverified" in capsys.readouterr().out
 
 
 def test_evidence_no_builder_answers(net):

@@ -66,20 +66,27 @@ async def poll_releases(peers: PeerClient, g: Genesis, node_id: str) -> list[Rel
         and isinstance(i.get("received_at"), (int, float))
     ]
     items = sorted(items, key=lambda i: i["received_at"], reverse=True)[:MAX_RELEASES]
-    bundles = await asyncio.gather(
-        *(peers.get_json(node_id, f"/v1/requests/{i['id']}/bundle") for i in items)
+    requests, bundles = await asyncio.gather(
+        asyncio.gather(
+            *(peers.get_json(node_id, f"/v1/requests/{i['id']}") for i in items)
+        ),
+        asyncio.gather(
+            *(peers.get_json(node_id, f"/v1/requests/{i['id']}/bundle") for i in items)
+        ),
     )
     out = []
-    for i, b in zip(items, bundles):
-        req = b.get("request") if isinstance(b, dict) else None
-        envs = b.get("envelopes") if isinstance(b, dict) else None
+    for i, r, b in zip(items, requests, bundles):
+        req = r.get("request") if isinstance(r, dict) else None
         e = parse_envelope(req, g)
         phase = i["phase"] if isinstance(i.get("phase"), str) else "?"
         if e is None or e.type != "release" or request_id(e.body) != i["id"]:
             out.append(Release(i["id"], None, phase, Verdict("INVALID")))
-        else:
-            v = verdict(req, envs if isinstance(envs, list) else [], g)
-            out.append(Release(i["id"], e.body, phase, v))
+            continue
+        envs = b.get("envelopes") if isinstance(b, dict) else None
+        if not isinstance(envs, list):
+            out.append(Release(i["id"], e.body, phase, Verdict("INVALID")))
+            continue
+        out.append(Release(i["id"], e.body, phase, verdict(e.raw, envs, g)))
     return out
 
 
@@ -193,7 +200,7 @@ class MatrixTui(App):
         elif self.view == "evidence" and key is not None:
             item = self.evidence[int(key)] if int(key) < len(self.evidence) else None
             if item is not None:
-                ok = "valid" if check_proof(item, self.g) else "NOT a valid proof"
+                ok = "valid" if check_proof(item, self.g) else "unverified"
                 self.extra = f"proof ({ok}):\n" + json.dumps(item.get("proof"), indent=2)
                 self.render_view()
 
@@ -262,7 +269,7 @@ class MatrixTui(App):
         names = {r.id: f"{r.body['tag']} ({r.id[:8]})" for r in self.releases if r.body}
         for i, e in enumerate(self.evidence):
             ok = check_proof(e, self.g)
-            proof = Text("valid", "green") if ok else Text("-" if e["kind"] == "STALL" else "?")
+            proof = Text("valid", "green") if ok else Text("unverified", "yellow")
             t.add_row(
                 Text(e["kind"], "red"),
                 e["signer"],

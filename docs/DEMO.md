@@ -22,10 +22,16 @@ python scripts/dev_genesis.py --out dev --addrs compose --profile demo --repo "$
 docker pull --platform linux/amd64 "$IMAGE"
 docker compose build
 
-# Tag commits (the CLI signs the commit, so look them up; ^{} peels annotated tags)
-c() { git ls-remote "$REPO" "refs/tags/$1^{}" "refs/tags/$1" | head -1 | cut -f1; }
-export C120=$(c v1.2.0) C121=$(c v1.2.1)
-echo "$C120 $C121"                         # two 40-hex SHAs, else stop and fix the repo
+# Tag commits (the CLI signs the commit, not an annotated tag object).
+# Prefer the peeled ref; use the tag ref itself only for lightweight tags.
+c() {
+  local ref
+  ref=$(git ls-remote --exit-code "$REPO" "refs/tags/$1^{}") ||
+    ref=$(git ls-remote --exit-code "$REPO" "refs/tags/$1") || return 1
+  printf '%s\n' "${ref%%[[:space:]]*}"
+}
+C120=$(c v1.2.0) && C121=$(c v1.2.1) && export C120 C121
+echo "$C120 $C121"                         # two 40-hex commit SHAs, else stop and fix the repo
 
 # Shorthand used by every scene
 alias mx='docker compose run --rm cli'
@@ -42,9 +48,18 @@ Expected hashes (AGENTS §10, fill in after B1):
 
 Put `BACKDOOR_HASH=<BAD121>` in `.env` (scene 3 reads it).
 
-**Offline verify machine (H9).** Copy `dev/genesis.json` to `~/.matrix/genesis.json` and
-`dev/genesis.sha256` to `~/.matrix/genesis.sha256` on it, `pip install -e .`, and keep its network
-**off** during scene 1 and 4. `matrix verify` never opens a socket.
+**Offline verify machine (H9).** Before disconnecting, copy `dev/genesis.json` to
+`~/.matrix/genesis.json` and `dev/genesis.sha256` to `~/.matrix/genesis.sha256` on it.
+From a reviewed Matrix source checkout there, install the verifier and set `REPO`
+to the same trusted canonical URL used above (H3):
+
+```bash
+pip install -e .
+export REPO=https://github.com/<org>/matrix-hello
+```
+
+Keep its network **off** during scenes 1 and 4. `matrix verify` never opens a socket; its
+`--repo "$REPO"` argument must come from the consumer, not from an untrusted certificate.
 
 ## 1. Reset (between scenes)
 
@@ -75,19 +90,21 @@ mx release --repo "$REPO" --tag v1.2.0 --commit "$C120" \
 echo "exit $?"
 ```
 
-Expected (order of builders varies):
+Expected after certification (the number and order of votes received vary):
 
 ```
 request <64 hex> https://github.com/<org>/matrix-hello@v1.2.0
 request <64 hex>
 verdict AGREED <H120>
-  builder1     laptopA    <H120[:16]>      ok
-  ...                                        (8 rows, all ok)
+  builder1     laptopA    <result or ->     <ok or ->
+  ...                           (8 builder rows; unreported results show "-")
 CERTIFIED <H120> -> dist/v1.2.0/hello
 exit 0
 ```
 
-TUI Releases: `hello@v1.2.0`, attested goes to `8/8`, quorum `3/3`, verdict `AGREED`.
+TUI Releases: quorum reaches `3/3` and verdict `AGREED`; attestations may continue to
+fill toward `8/8` as builders finish. The CLI stops once it has a certified quorum,
+so some printed builder rows may not yet have an attestation.
 
 Copy `dist/v1.2.0/hello` and `dist/v1.2.0/hello.matrix.json` to the offline machine (USB stick), then:
 
@@ -107,9 +124,13 @@ mx release --repo "$REPO" --tag v1.2.1 --commit "$C121" \
 echo "exit $?"
 ```
 
-Expected: `verdict AGREED <H121>`, builder3's row shows `<BAD121[:16]>  DISAGREE`, then
-`WARNING: some builders disagree with the certified hash`, `CERTIFIED <H121>`, `exit 0`.
-TUI Detail (`r`, `Enter`): builder3 red `DISAGREE`, everyone else green `ok`.
+Expected: `verdict AGREED <H121>`, `CERTIFIED <H121>`, `exit 0`. If builder3's
+vote arrived before the CLI stopped, its row shows `<BAD121[:16]>  DISAGREE` and
+the CLI warns about disagreement. Otherwise wait for propagation and use TUI Detail
+(`r`, `Enter`) or `mx status <request id>` to show builder3's red `DISAGREE`;
+other builders with observed honest votes show `ok`.
+The TUI's verdict verifies the quorum against the signed request. A standalone `DISAGREE`
+evidence item with one signed vote is **unverified** without that request and quorum.
 
 **Save the backdoored binary now** (scene 4 needs it, and the next reset deletes it):
 
@@ -132,8 +153,10 @@ mx release --repo "$REPO" --tag v1.2.1 --commit "$C121" \
 echo "exit $?"
 ```
 
-Expected: builder5 and builder6 both `<BAD121[:16]>  DISAGREE`, two matching fake votes, still
-below 3. The honest hash certifies: `CERTIFIED <H121>`, `exit 0`.
+Expected: the honest hash certifies (`CERTIFIED <H121>`, `exit 0`). Once both
+faulty votes propagate, TUI Detail or `mx status <request id>` shows builder5
+and builder6 as `<BAD121[:16]>  DISAGREE`; their two matching fake votes remain
+below the threshold of 3. They need not appear before the CLI certifies.
 
 Say: "Laptop C is the whole fault budget, f = 2. They agree with each other and it does not matter."
 
@@ -171,7 +194,8 @@ docker compose stop builder7 builder8
 On the tinc network: pull laptop D's cable instead of `docker compose stop`.
 
 Expected: TUI Builders shows builder7 and builder8 `reachable no`. The release still prints
-`CERTIFIED <H120>`, `exit 0`, with 6 rows `ok` and 2 rows without a result.
+`CERTIFIED <H120>`, `exit 0`, if enough remaining builders respond. The CLI prints
+all 8 builder rows, but only votes already received show `ok`; absent votes show `-`.
 Bring them back afterwards: `docker compose start builder7 builder8`.
 
 ## 7. Scene 6: caught cheater (builder2 equivocates)
@@ -186,9 +210,11 @@ mx release --repo "$REPO" --tag v1.2.0 --commit "$C120" \
 mx evidence --since 1h
 ```
 
-Expected: `CERTIFIED <H120>`, exit 0, builder2 shown as `EQUIVOCATION` and left out of the
-certificate. `evidence` prints `EQUIVOCATION builder2 <id[:16]> proof-ok`.
-TUI: press `e`, then `Enter` on the row: `proof (valid):` and two signed attestations by builder2
+Expected: `CERTIFIED <H120>`, exit 0. Once both conflicting signed votes propagate,
+builder2 shows `EQUIVOCATION` in TUI Detail or `mx status <request id>`.
+`evidence` prints `EQUIVOCATION builder2 <id[:16]> proof-ok`; if it has not
+appeared yet, repeat after the next sync round. TUI: press `e`, then `Enter`
+on the row: `proof (valid):` and two signed attestations by builder2
 with different results. Say: "Anyone can check this proof with the genesis public keys."
 
 Evidence appears after the next sync round (5 s in the demo profile).

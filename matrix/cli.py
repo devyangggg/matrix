@@ -216,8 +216,12 @@ def _print_table(g: Genesis, rid: str, v: Verdict) -> None:
 
 
 def check_proof(item: dict, g: Genesis) -> bool:
-    """True if `item.proof` alone proves the claim: two validly signed, conflicting attestations
-    by `signer` for `request_id` (EQUIVOCATION), or one signed attestation (DISAGREE)."""
+    """Only EQUIVOCATION is self-contained: two signed, conflicting attestations
+    by the named signer for the named request. DISAGREE needs a verified request
+    and quorum; STALL and unknown kinds cannot be proved by this payload alone.
+    """
+    if item.get("kind") != "EQUIVOCATION":
+        return False
     proof = item.get("proof")
     if not isinstance(proof, list):
         return False
@@ -230,8 +234,7 @@ def check_proof(item: dict, g: Genesis) -> bool:
         for e in envs
     ):
         return False
-    results = {e.body["result"] for e in envs}
-    return len(results) >= 2 if item.get("kind") == "EQUIVOCATION" else len(envs) >= 1
+    return len({e.body["result"] for e in envs}) >= 2
 
 
 def _load(a: argparse.Namespace) -> Genesis | None:
@@ -409,7 +412,7 @@ async def _evidence(since: int, g: Genesis) -> int:
         _err("no builder answered")
         return EXIT_ERROR
     for it in items:
-        proof = "proof-ok" if check_proof(it, g) else "no-proof"
+        proof = "proof-ok" if check_proof(it, g) else "unverified"
         _out(f"{it['kind']:<12} {it['signer']:<12} {it['request_id'][:16]} {proof}")
     if not items:
         _out("no evidence")
