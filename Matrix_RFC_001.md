@@ -461,29 +461,29 @@ Rules for a builder `X` handling request `q`, where `t0` is X's local receipt ti
 
 ```python
 def verdict(request_env, envelopes, genesis) -> Verdict:
-    req = Envelope.parse(request_env, genesis)   # caller decides which request to evaluate
+    req = Envelope.parse(request_env, genesis)  # caller decides which request to evaluate
     if not req or req.type != "release" or not valid_request(req.body, genesis):
         return INVALID
     rid = request_id(req.body)
     sel = set(selected(rid, genesis.nodes, genesis.replicas))
 
-    seen = defaultdict(set)                      # signer -> distinct results
+    seen = defaultdict(set)  # signer -> distinct results
     for raw in envelopes:
-        e = Envelope.parse(raw, genesis)         # None unless schema, formats and signature are valid
+        e = Envelope.parse(raw, genesis)  # None unless schema, formats and signature are valid
         if e and e.type == "attest" and e.body.request_id == rid and e.signer in sel:
             seen[e.signer].add(e.body.result)
 
-    results = {s: next(iter(rs)) for s, rs in seen.items() if len(rs) == 1}   # equivocators dropped
+    results = {s: next(iter(rs)) for s, rs in seen.items() if len(rs) == 1}  # equivocators dropped
     counts = Counter(results.values())
     quorum = [r for r, k in counts.items() if k >= genesis.threshold]
     outstanding = len(sel) - len(results)
 
     if len(quorum) > 1:
-        return NOT_REPRODUCIBLE                  # two quorums => two honest builders disagree
+        return NOT_REPRODUCIBLE  # two quorums => two honest builders disagree
     if quorum:
         return BUILD_FAILED if quorum[0] == "FAILED" else AGREED(quorum[0])
     if max(counts.values(), default=0) + outstanding < genesis.threshold:
-        return NOT_REPRODUCIBLE                  # no result can still reach T
+        return NOT_REPRODUCIBLE  # no result can still reach T
     return PENDING
 ```
 
