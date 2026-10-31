@@ -5,10 +5,98 @@ from fakes import FakePeers
 from textual.widgets import DataTable, Static
 
 from matrix.model import request_id
-from matrix.tui import MatrixTui, poll_evidence, poll_health, poll_log, poll_releases
+from matrix.tui import (
+    MatrixTui,
+    _intro,
+    _intro_frame,
+    poll_evidence,
+    poll_health,
+    poll_log,
+    poll_releases,
+)
 
 H = "a" * 64
 OTHER = "e" * 64
+
+
+class IntroWindow:
+    def __init__(self, rows, cols, key=-1):
+        self.rows, self.cols, self.key = rows, cols, key
+        self.cells = []
+        self.reads = 0
+
+    def getmaxyx(self):
+        return self.rows, self.cols
+
+    def erase(self):
+        self.cells = []
+
+    def addstr(self, y, x, text, attr):
+        assert 0 <= y < self.rows and 0 <= x < self.cols
+        assert x + len(text) <= self.cols
+        self.cells.append((y, x, text, attr))
+
+    def getch(self):
+        self.reads += 1
+        return self.key
+
+    def nodelay(self, value):
+        assert value
+
+    def keypad(self, value):
+        assert value
+
+    def refresh(self):
+        pass
+
+
+INTRO_COLORS = {"purple": 1, "green": 2, "muted": 3, "fade1": 4, "fade2": 5, "text": 6}
+
+
+def test_intro_four_phases_and_small_terminal_bounds():
+    for rows, cols in [(1, 1), (8, 30), (10, 42), (18, 80), (24, 84), (30, 110)]:
+        win = IntroWindow(rows, cols)
+        for elapsed in (0, 0.2, 0.7, 1.12, 1.32, 1.7, 1.9):
+            _intro_frame(win, elapsed, INTRO_COLORS)
+            assert win.cells
+            if rows < 10 or cols < 42:
+                assert "".join(cell[2] for cell in win.cells) == "[ MATRIX ]"[:cols]
+                continue
+            drawn = "".join(cell[2] for cell in win.cells)
+            if elapsed == 0:
+                assert "[" in drawn and "]" in drawn
+            if elapsed == 0.7:
+                assert "█" in drawn and any(cell[3] == INTRO_COLORS["green"] for cell in win.cells)
+            if elapsed == 1.32:
+                assert "RELEASE" not in drawn  # tagline is spaced, not a logo letter
+                assert "R E L E A S E" in drawn
+            if elapsed == 1.9:
+                assert "▒" in drawn or "░" in drawn
+
+
+def test_tagline_fades_from_muted_to_primary():
+    win = IntroWindow(24, 84)
+    for elapsed, colour in (
+        (1.13, "muted"),
+        (1.23, "fade1"),
+        (1.32, "fade2"),
+        (1.42, "text"),
+    ):
+        _intro_frame(win, elapsed, INTRO_COLORS)
+        assert (
+            next(attr for _, _, text, attr in win.cells if "R E L E A S E" in text)
+            == (INTRO_COLORS[colour])
+        )
+
+
+def test_any_key_skips_intro_immediately(monkeypatch):
+    from matrix import tui
+
+    monkeypatch.setattr(tui.curses, "curs_set", lambda _: None)
+    monkeypatch.setattr(tui, "_intro_colors", lambda: INTRO_COLORS)
+    win = IntroWindow(24, 84, key=ord("x"))
+    _intro(win)
+    assert win.reads == 1 and win.cells == []
 
 
 @pytest.fixture

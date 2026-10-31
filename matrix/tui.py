@@ -6,9 +6,12 @@ keeps nothing beyond the last poll result.
 """
 
 import asyncio
+import curses
 import json
+import os
 import re
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,6 +31,165 @@ from .verdict import Verdict, verdict
 MAX_RELEASES = 20  # newest first; bounds the per-second polling load
 MAX_LOG = 65536
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
+
+_COLORS = {
+    "background": "#11111B",
+    "panel": "#1D1B2A",
+    "text": "#EDE9F5",
+    "muted": "#9995AC",
+    "purple": "#C4B5FD",
+    "green": "#7DD3C0",
+    "yellow": "#E6B86B",
+    "red": "#D68198",
+    "border": "#353246",
+}
+_FONT = {
+    "M": ["#   #", "## ##", "# # #", "#   #", "#   #"],
+    "A": [" ### ", "#   #", "#####", "#   #", "#   #"],
+    "T": ["#####", "  #  ", "  #  ", "  #  ", "  #  "],
+    "R": ["#### ", "#   #", "#### ", "#  # ", "#   #"],
+    "I": ["#####", "  #  ", "  #  ", "  #  ", "#####"],
+    "X": ["#   #", " # # ", "  #  ", " # # ", "#   #"],
+}
+_TAGLINE = "R E L E A S E   O B S E R V A T O R Y"
+_INTRO_SECONDS = 2.0
+
+
+def _intro_colors() -> dict[str, int]:
+    """Curses uses the nearest palette colours; Textual uses truecolour when available."""
+    if not curses.has_colors():
+        return dict.fromkeys(("purple", "green", "muted", "fade1", "fade2", "text"), 0)
+    curses.start_color()
+    try:
+        curses.use_default_colors()
+        background = -1
+    except curses.error:
+        background = curses.COLOR_BLACK
+    palette = (
+        (183, curses.COLOR_MAGENTA),
+        (121, curses.COLOR_CYAN),
+        (245, curses.COLOR_WHITE),
+        (249, curses.COLOR_WHITE),
+        (252, curses.COLOR_WHITE),
+        (255, curses.COLOR_WHITE),
+    )
+    for pair, (indexed, basic) in enumerate(palette, 1):
+        curses.init_pair(pair, indexed if curses.COLORS >= 256 else basic, background)
+    return dict(
+        zip(
+            ("purple", "green", "muted", "fade1", "fade2", "text"),
+            (curses.color_pair(i) for i in range(1, 7)),
+        )
+    )
+
+
+def _put(win: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
+    rows, cols = win.getmaxyx()
+    if 0 <= y < rows and 0 <= x < cols:
+        try:
+            win.addstr(y, x, text[: cols - x], attr)
+        except curses.error:
+            pass  # Some terminals refuse to write their bottom-right cell.
+
+
+def _intro_frame(win: curses.window, elapsed: float, colors: dict[str, int]) -> None:
+    """Render one bounded frame; elapsed time determines the four animation phases."""
+    rows, cols = win.getmaxyx()
+    win.erase()
+    if cols < 42 or rows < 10:
+        label = "[ MATRIX ]"
+        _put(win, rows // 2, max(0, (cols - len(label)) // 2), label, colors["purple"])
+        return
+
+    sx, sy = (2 if cols >= 84 else 1), (2 if rows >= 20 else 1)
+    lines = [
+        (" ".join(_FONT[letter][row] for letter in "MATRIX"))
+        .replace("#", "█" * sx)
+        .replace(" ", " " * sx)
+        for row in range(5)
+    ]
+    width, height = len(lines[0]), 5 * sy
+    left, top = (cols - width) // 2, max(0, (rows - height - 3) // 2)
+    centre = cols // 2
+
+    if elapsed < 0.3:
+        extent = 1 + int((height - 1) * elapsed / 0.3)
+        bracket_top = top + (height - extent) // 2
+        bracket_left, bracket_right = centre - 1, centre
+    else:
+        extent, bracket_top = height, top
+        slide = min(1.0, max(0.0, (elapsed - 0.3) / 0.4))
+        slide = 1 - (1 - slide) ** 3
+        bracket_left = round(centre - 1 + (left - 2 - centre + 1) * slide)
+        bracket_right = round(centre + (left + width + 1 - centre) * slide)
+    for offset in range(extent):
+        if extent == 1:
+            lhs, rhs = "[", "]"
+        elif offset == 0:
+            lhs, rhs = "┌", "┐"
+        elif offset == extent - 1:
+            lhs, rhs = "└", "┘"
+        else:
+            lhs, rhs = "│", "│"
+        if elapsed >= 1.67:
+            stage = min(4, int((elapsed - 1.67) / 0.33 * 5))
+            lhs = rhs = ("▓", "▒", "░", " ", " ")[stage]
+        _put(win, bracket_top + offset, bracket_left, lhs, colors["purple"])
+        _put(win, bracket_top + offset, bracket_right, rhs, colors["purple"])
+
+    if elapsed < 0.3:
+        return
+    reveal = min(1.0, (elapsed - 0.3) / 0.82)
+    radius = (width / 2 + 1) * (1 - (1 - reveal) ** 3)
+    shimmer = (elapsed - 1.12) / 0.36 * (width + 4) - 2
+    for row, line in enumerate(lines):
+        for col, cell in enumerate(line):
+            if cell != "█" or abs(col - (width - 1) / 2) > radius:
+                continue
+            attr = colors["purple"]
+            if (elapsed < 1.12 and abs(abs(col - (width - 1) / 2) - radius) < 1.5) or (
+                1.12 <= elapsed < 1.48 and abs(col - shimmer) < 2
+            ):
+                attr = colors["green"]
+            y = top + row * sy
+            if elapsed >= 1.67:
+                progress = (elapsed - 1.67) / 0.33
+                stage = min(4, int(progress * 5 + ((col * 7 + row * 11) % 4) / 5))
+                cell = ("█", "▓", "▒", "░", " ")[stage]
+                y -= min(2, int(progress * 3))
+            for vertical in range(sy):
+                _put(win, y + vertical, left + col, cell, attr)
+
+    if 1.12 <= elapsed < 1.67:
+        step = min(3, int((elapsed - 1.12) / 0.36 * 4))
+        attr = colors[("muted", "fade1", "fade2", "text")[step]]
+        _put(win, top + height + 1, max(0, (cols - len(_TAGLINE)) // 2), _TAGLINE, attr)
+
+
+def _intro(win: curses.window) -> None:
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    win.nodelay(True)
+    win.keypad(True)
+    colors = _intro_colors()
+    start = time.monotonic()
+    while True:
+        if win.getch() != -1:  # Any key skips the intro, including on its first frame.
+            return
+        elapsed = time.monotonic() - start
+        if elapsed >= _INTRO_SECONDS:
+            return
+        try:
+            size = os.get_terminal_size(sys.stdout.fileno())
+            if (size.lines, size.columns) != win.getmaxyx():
+                curses.resizeterm(size.lines, size.columns)
+        except (OSError, curses.error):
+            pass  # The next frame still clips to curses' current bounds.
+        _intro_frame(win, elapsed, colors)
+        win.refresh()
+        time.sleep(min(0.035, _INTRO_SECONDS - elapsed))
 
 
 @dataclass(frozen=True)
@@ -109,7 +271,7 @@ def _time(t: object) -> str:
 
 
 def _verdict_text(v: Verdict) -> Text:
-    style = {"AGREED": "green", "PENDING": "yellow"}.get(v.state, "red")
+    style = {"AGREED": _COLORS["green"], "PENDING": _COLORS["yellow"]}.get(v.state, _COLORS["red"])
     label = f"AGREED {v.hash[:12]}" if v.state == "AGREED" else v.state
     return Text(label, style=style)
 
@@ -118,7 +280,52 @@ def _verdict_text(v: Verdict) -> Text:
 
 
 class MatrixTui(App):
-    TITLE = "Matrix"
+    TITLE = "MATRIX"
+    CSS = f"""
+    Screen {{
+        background: {_COLORS["background"]};
+        color: {_COLORS["text"]};
+    }}
+    Header {{
+        background: {_COLORS["panel"]};
+        color: {_COLORS["purple"]};
+    }}
+    #status {{
+        height: 3;
+        padding: 0 1;
+        background: {_COLORS["panel"]};
+        border: round {_COLORS["border"]};
+    }}
+    DataTable {{
+        height: 1fr;
+        background: {_COLORS["panel"]};
+        color: {_COLORS["text"]};
+        border: round {_COLORS["border"]};
+    }}
+    DataTable:focus {{
+        border: round {_COLORS["purple"]};
+    }}
+    #extra {{
+        height: auto;
+        max-height: 35%;
+        overflow-y: auto;
+        background: {_COLORS["panel"]};
+        color: {_COLORS["muted"]};
+        border: round {_COLORS["border"]};
+    }}
+    Footer {{
+        background: {_COLORS["panel"]};
+        color: {_COLORS["muted"]};
+    }}
+    FooterKey .footer-key--key {{
+        color: {_COLORS["purple"]};
+        background: {_COLORS["panel"]};
+    }}
+    FooterKey .footer-key--description {{
+        color: {_COLORS["muted"]};
+        background: {_COLORS["panel"]};
+    }}
+    """
     BINDINGS: ClassVar = [
         Binding("b", "show('builders')", "Builders"),
         Binding("r", "show('releases')", "Releases"),
@@ -208,10 +415,27 @@ class MatrixTui(App):
         table.clear(columns=True)
         status = getattr(self, f"_render_{self.view}")(table)
         reachable = sum(1 for h in self.health.values() if h is not None)
-        self.query_one("#status", Static).update(
-            f"[b]{self.view.upper()}[/b]  node {self.node_id}  "
-            f"builders up {reachable}/{len(self.g.nodes)}  {status}"
+        healthy = sum(
+            1
+            for n in self.g.nodes
+            if (h := self.health.get(n.id)) is not None
+            and h.get("genesis_hash") == self.g.hash
+            and h.get("node_id") == n.id
         )
+        connection = (
+            _COLORS["green"]
+            if healthy == len(self.g.nodes)
+            else _COLORS["yellow"]
+            if reachable
+            else _COLORS["red"]
+        )
+        summary = Text.assemble(
+            (self.view.upper(), f"bold {_COLORS['purple']}"),
+            (f"  │  node {self.node_id}  │  ", _COLORS["muted"]),
+            (f"builders up {reachable}/{len(self.g.nodes)}", connection),
+            (f"  │  {status}", _COLORS["muted"]),
+        )
+        self.query_one("#status", Static).update(summary)
         self.query_one("#extra", Static).update(Text(self.extra))
         if table.row_count:
             table.move_cursor(row=min(row, table.row_count - 1))
@@ -227,9 +451,16 @@ class MatrixTui(App):
                 n.operator,
                 n.id,
                 n.addr,
-                Text("yes", "green") if h else Text("no", "red"),
-                Text("match", "green") if match else Text("-" if h is None else "MISMATCH", "red"),
-                _time(h.get("now")) if h else "-",
+                Text("yes", _COLORS["green"]) if h else Text("no", _COLORS["red"]),
+                Text(
+                    "match" if match else "-" if h is None else "MISMATCH",
+                    _COLORS["green"]
+                    if match
+                    else _COLORS["muted"]
+                    if h is None
+                    else _COLORS["yellow"],
+                ),
+                Text(_time(h.get("now")) if h else "-", _COLORS["muted"]),
             )
         return f"genesis {self.g.hash[:16]}"
 
@@ -239,11 +470,14 @@ class MatrixTui(App):
             att, top = r.counts()
             name = f"{r.body['repo_url'].rsplit('/', 1)[-1]}@{r.body['tag']}" if r.body else "?"
             t.add_row(
-                r.id[:12],
-                name,
-                r.phase,
+                Text(r.id[:12], _COLORS["muted"]),
+                Text(name, _COLORS["purple"]),
+                Text(r.phase, _COLORS["muted"]),
                 f"{att}/{self.g.replicas}",
-                f"{min(top, self.g.threshold)}/{self.g.threshold}",
+                Text(
+                    f"{min(top, self.g.threshold)}/{self.g.threshold}",
+                    _COLORS["green"] if top >= self.g.threshold else _COLORS["yellow"],
+                ),
                 _verdict_text(r.verdict),
                 key=r.id,
             )
@@ -254,9 +488,14 @@ class MatrixTui(App):
         r = next((r for r in self.releases if r.id == self.detail_id), None)
         if r is None:
             return f"release {self.detail_id or '?'} not on this node"
-        style = {"ok": "green", "": ""}
+        style = {
+            "ok": _COLORS["green"],
+            "DISAGREE": _COLORS["red"],
+            "EQUIVOCATION": _COLORS["red"],
+        }
         for nid, op, res, mark in builder_rows(self.g, r.id, r.verdict):
-            t.add_row(nid, op, res, Text(mark or "-", style.get(mark, "red")))
+            colour = style.get(mark, _COLORS["yellow"])
+            t.add_row(nid, op, Text(res, colour), Text(mark or "-", colour))
         name = f"{r.body['repo_url']}@{r.body['tag']}" if r.body else "?"
         return f"{name}  " + _verdict_text(r.verdict).plain + "  l: log tail"
 
@@ -265,12 +504,15 @@ class MatrixTui(App):
         names = {r.id: f"{r.body['tag']} ({r.id[:8]})" for r in self.releases if r.body}
         for i, e in enumerate(self.evidence):
             ok = check_proof(e, self.g)
-            proof = Text("valid", "green") if ok else Text("unverified", "yellow")
+            proof = Text(
+                "valid" if ok else "unverified",
+                _COLORS["green"] if ok else _COLORS["yellow"],
+            )
             t.add_row(
-                Text(e["kind"], "red"),
+                Text(e["kind"], _COLORS["red"]),
                 e["signer"],
                 names.get(e["request_id"], e["request_id"][:12]),
-                _time(e.get("created_at")),
+                Text(_time(e.get("created_at")), _COLORS["muted"]),
                 proof,
                 key=str(i),
             )
@@ -278,6 +520,11 @@ class MatrixTui(App):
 
 
 def run_tui(g: Genesis, node_id: str) -> int:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            curses.wrapper(_intro)  # wrapper restores terminal modes before Textual starts.
+        except (curses.error, OSError):
+            pass  # A terminal without curses support can still run the dashboard.
     MatrixTui(g, node_id).run()
     return 0
 
