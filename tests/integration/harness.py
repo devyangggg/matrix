@@ -96,9 +96,7 @@ class Network:
             try:
                 async with self.session.get(url) as response:
                     data = await response.json()
-                    expected = (
-                        (self.directory / "dev" / "genesis.sha256").read_text().strip()
-                    )
+                    expected = (self.directory / "dev" / "genesis.sha256").read_text().strip()
                     if (
                         response.status == 200
                         and data["node_id"] == node_id
@@ -113,9 +111,7 @@ class Network:
         )
 
     def address(self, node_id: str) -> str:
-        return next(
-            node["addr"] for node in self.genesis["nodes"] if node["id"] == node_id
-        )
+        return next(node["addr"] for node in self.genesis["nodes"] if node["id"] == node_id)
 
     async def post(self, node_id: str, path: str, envelope: dict) -> int:
         async with self.session.post(

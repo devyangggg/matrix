@@ -50,11 +50,7 @@ def _fault(args: argparse.Namespace) -> Fault:
 
 def _listen(address: str) -> tuple[str, int]:
     host, separator, port_text = address.rpartition(":")
-    if (
-        not separator
-        or not host
-        or re.fullmatch(r"[0-9]{1,5}", port_text, re.ASCII) is None
-    ):
+    if not separator or not host or re.fullmatch(r"[0-9]{1,5}", port_text, re.ASCII) is None:
         raise ValueError("--listen must be HOST:PORT")
     port = int(port_text)
     if not 0 < port < 65536:
@@ -106,9 +102,7 @@ async def run(args: argparse.Namespace) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stopped.set)
         stop_waiter = asyncio.create_task(stopped.wait())
-        done, _ = await asyncio.wait(
-            [*tasks, stop_waiter], return_when=asyncio.FIRST_COMPLETED
-        )
+        done, _ = await asyncio.wait([*tasks, stop_waiter], return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             if task is not stop_waiter:
                 task.result()

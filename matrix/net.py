@@ -14,9 +14,7 @@ _HEX64 = r"[0-9a-f]{64}"
 
 
 def _error(code: str, status: int) -> web.Response:
-    return web.json_response(
-        {"error": code, "detail": code.replace("_", " ")}, status=status
-    )
+    return web.json_response({"error": code, "detail": code.replace("_", " ")}, status=status)
 
 
 def _since(request: web.Request) -> float:
@@ -130,9 +128,7 @@ def make_app(engine: Any, store: Any, g: Any, me: Any, env: Any) -> web.Applicat
                     return _error("not_found", 404)
                 data[0] ^= 0xFF
                 return web.Response(body=data, content_type="application/octet-stream")
-            return web.FileResponse(
-                path, headers={"Content-Type": "application/octet-stream"}
-            )
+            return web.FileResponse(path, headers={"Content-Type": "application/octet-stream"})
         except OSError:
             return _error("not_found", 404)
 
@@ -140,9 +136,7 @@ def make_app(engine: Any, store: Any, g: Any, me: Any, env: Any) -> web.Applicat
         items = []
         for row in store.list_evidence(_since(request)):
             item = dict(row)
-            item["proof"] = (
-                json.loads(item["proof"]) if item["proof"] is not None else None
-            )
+            item["proof"] = json.loads(item["proof"]) if item["proof"] is not None else None
             items.append(item)
         return web.json_response({"now": clock(), "evidence": items})
 
@@ -169,11 +163,7 @@ class PeerClient:
 
     def _url(self, node_id: str, path: str) -> str | None:
         node = self.g.node(node_id)
-        return (
-            f"http://{node.addr}{path}"
-            if node is not None and node.id != self.me.id
-            else None
-        )
+        return f"http://{node.addr}{path}" if node is not None and node.id != self.me.id else None
 
     async def _post(self, node_id: str, path: str, envelope: dict) -> None:
         url = self._url(node_id, path)
@@ -199,9 +189,7 @@ class PeerClient:
         except (ClientError, OSError, TimeoutError):
             pass
 
-    def _broadcast(
-        self, path: str, envelope: dict, only: list[str] | None = None
-    ) -> None:
+    def _broadcast(self, path: str, envelope: dict, only: list[str] | None = None) -> None:
         for node in self.g.nodes:
             if node.id == self.me.id or (only is not None and node.id not in only):
                 continue

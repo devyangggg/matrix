@@ -9,25 +9,19 @@ from pathlib import Path
 
 from nacl.signing import SigningKey
 
-REPO_PATTERN = re.compile(
-    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.ASCII
-)
+REPO_PATTERN = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.ASCII)
 IMAGE_PATTERN = re.compile(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", re.ASCII)
 
 
 def repo_url(value: str) -> str:
     if REPO_PATTERN.fullmatch(value) is None:
-        raise argparse.ArgumentTypeError(
-            "repo must match https://github.com/<owner>/<repo>"
-        )
+        raise argparse.ArgumentTypeError("repo must match https://github.com/<owner>/<repo>")
     return value
 
 
 def image_digest(value: str) -> str:
     if IMAGE_PATTERN.fullmatch(value) is None:
-        raise argparse.ArgumentTypeError(
-            "image must be <name>@sha256:<64 lowercase hex digits>"
-        )
+        raise argparse.ArgumentTypeError("image must be <name>@sha256:<64 lowercase hex digits>")
     return value
 
 
@@ -50,17 +44,11 @@ def generate(out: Path, addrs: str, profile: str, repos: list[str], image: str) 
     key_paths = [keys_dir / f"builder{i}.key" for i in range(1, 9)]
     key_paths.append(keys_dir / "release.key")
     if any(path.exists() for path in key_paths):
-        raise FileExistsError(
-            f"key files already exist in {keys_dir}; choose a fresh --out"
-        )
+        raise FileExistsError(f"key files already exist in {keys_dir}; choose a fresh --out")
 
     nodes = []
     for number, key_path in enumerate(key_paths[:8], start=1):
-        addr = (
-            f"builder{number}:7700"
-            if addrs == "compose"
-            else f"127.0.0.1:{7699 + number}"
-        )
+        addr = f"builder{number}:7700" if addrs == "compose" else f"127.0.0.1:{7699 + number}"
         nodes.append(
             {
                 "id": f"builder{number}",

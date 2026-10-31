@@ -29,9 +29,7 @@ TOP_LEVEL = {
 }
 
 
-def run_generator(
-    out: Path, addrs: str, profile: str
-) -> subprocess.CompletedProcess[str]:
+def run_generator(out: Path, addrs: str, profile: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,
@@ -59,9 +57,7 @@ def run_generator(
 @pytest.mark.parametrize(
     "profile,build_timeout,sync_interval", [("demo", 45, 5), ("full", 150, 10)]
 )
-def test_genesis_and_private_keys(
-    tmp_path, addrs, profile, build_timeout, sync_interval
-):
+def test_genesis_and_private_keys(tmp_path, addrs, profile, build_timeout, sync_interval):
     out = tmp_path / "nested" / "dev"
     run_generator(out, addrs, profile)
 
@@ -95,13 +91,10 @@ def test_genesis_and_private_keys(
         f"laptop{letter}" for letter in "ABCD" for _ in range(2)
     ]
     assert [node["addr"] for node in raw["nodes"]] == [
-        f"builder{i}:7700" if addrs == "compose" else f"127.0.0.1:{7699 + i}"
-        for i in range(1, 9)
+        f"builder{i}:7700" if addrs == "compose" else f"127.0.0.1:{7699 + i}" for i in range(1, 9)
     ]
     assert [signer["id"] for signer in raw["release_signers"]] == ["ci-release"]
-    key_pubkeys = [
-        (f"builder{i}", node["pubkey"]) for i, node in enumerate(raw["nodes"], 1)
-    ]
+    key_pubkeys = [(f"builder{i}", node["pubkey"]) for i, node in enumerate(raw["nodes"], 1)]
     key_pubkeys.append(("release", raw["release_signers"][0]["pubkey"]))
     assert len({pubkey for _, pubkey in key_pubkeys}) == 9
     for name, pubkey in key_pubkeys:

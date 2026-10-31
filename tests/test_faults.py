@@ -23,9 +23,7 @@ def test_default_fault_is_inert(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     "mode", ["inject", "lie", "collude", "stall", "equivocate", "bad-artifact"]
 )
-def test_non_crash_modes_do_not_exit(
-    mode: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_non_crash_modes_do_not_exit(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
     def unexpected_exit(code: int) -> None:
         pytest.fail(f"unexpected exit with code {code}")
 

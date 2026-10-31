@@ -18,9 +18,7 @@ PATCH = ROOT / "examples" / "faults" / "backdoor.patch"
 @pytest.fixture(autouse=True)
 def prerequisites():
     if not all((REPO, IMAGE, TAG, COMMIT)):
-        pytest.skip(
-            "set MATRIX_TEST_REPO, MATRIX_TEST_IMAGE, MATRIX_TEST_TAG, MATRIX_TEST_COMMIT"
-        )
+        pytest.skip("set MATRIX_TEST_REPO, MATRIX_TEST_IMAGE, MATRIX_TEST_TAG, MATRIX_TEST_COMMIT")
 
 
 def signed_request(network):
@@ -28,9 +26,7 @@ def signed_request(network):
     from matrix.model import make_envelope, request_id
 
     g = load_genesis(str(network.directory / "dev" / "genesis.json"))
-    seed = bytes.fromhex(
-        (network.directory / "dev" / "keys" / "release.key").read_text().strip()
-    )
+    seed = bytes.fromhex((network.directory / "dev" / "keys" / "release.key").read_text().strip())
     body = {"v": 1, "repo_url": REPO, "tag": TAG, "commit": COMMIT}
     return (
         request_id(body),
@@ -103,9 +99,7 @@ async def test_faulty_builders_cannot_certify_fake_hash(tmp_path, mode, placemen
         "equivocate": ["--fault", "equivocate"],
         "bad-artifact": ["--fault", "bad-artifact"],
     }
-    async with Network(
-        tmp_path, {node: settings[mode] for node in placement}
-    ) as network:
+    async with Network(tmp_path, {node: settings[mode] for node in placement}) as network:
         rid, request, genesis = await release(network)
         result = await collect(network, rid, request, genesis)
         assert result.state == "AGREED"
@@ -135,10 +129,7 @@ async def test_faulty_builders_cannot_certify_fake_hash(tmp_path, mode, placemen
                     f"http://{network.address('builder8')}/v1/evidence"
                 ) as response:
                     items = (await response.json())["evidence"]
-                    proof = any(
-                        item["kind"] == "EQUIVOCATION" and item["proof"]
-                        for item in items
-                    )
+                    proof = any(item["kind"] == "EQUIVOCATION" and item["proof"] for item in items)
                 if proof:
                     break
                 await asyncio.sleep(1)

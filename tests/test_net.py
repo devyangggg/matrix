@@ -177,9 +177,7 @@ async def test_peer_client_posts_hint_and_bounds_download(api):
     address = client.make_url("/").host + ":" + str(client.make_url("/").port)
     me = SimpleNamespace(id="builder1")
     peer = SimpleNamespace(id="builder2", addr=address)
-    g = SimpleNamespace(
-        nodes=[me, peer], node=lambda node_id: peer if node_id == peer.id else me
-    )
+    g = SimpleNamespace(nodes=[me, peer], node=lambda node_id: peer if node_id == peer.id else me)
     peers = PeerClient(g, me)
     try:
         await peers.broadcast_request({"hello": "world"})
