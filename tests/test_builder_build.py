@@ -399,3 +399,22 @@ async def test_output_that_is_a_symlink_is_never_followed(
     monkeypatch.setattr(b, "_run", link)
     out = await b.build(REQ, RID, genesis, env, 0)
     assert out.kind == "ERROR" and os.listdir(os.path.join(env.data_dir, "artifacts")) == []
+
+
+async def test_output_that_is_a_fifo_is_an_error_and_does_not_block(
+    genesis, env, script, monkeypatch
+):
+    orig = script.__call__
+
+    async def fifo(argv, log, **kw):
+        res = await orig(argv, log, **kw)
+        if script.step(argv) == "build":
+            out = next(a for a in argv if a.endswith(":/out")).split(":")[0]
+            os.remove(f"{out}/hello")
+            os.mkfifo(f"{out}/hello")  # with no writer, a plain open() would block forever
+        return res
+
+    monkeypatch.setattr(b, "_run", fifo)
+    out = await asyncio.wait_for(b.build(REQ, RID, genesis, env, 0), 5)
+    assert out.kind == "ERROR" and "regular" in out.reason and no_work_dir(env)
+    assert os.listdir(os.path.join(env.data_dir, "artifacts")) == []

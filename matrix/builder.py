@@ -308,9 +308,13 @@ def _read_recipe(src: str, g: Genesis):
 
 def _store_artifact(src_file: str, artifacts: str) -> tuple[str, str]:
     """Hash while copying to artifacts/<hash>.tmp, fsync, rename, fsync the directory."""
-    fd = os.open(src_file, os.O_RDONLY | os.O_NOFOLLOW)
+    # O_NONBLOCK: opening a FIFO with no writer must not block a worker thread forever.
+    fd = os.open(src_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as f:
-        if os.fstat(f.fileno()).st_size > MAX_ARTIFACT:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise _Stop("ERROR", "output is not a regular file")
+        if st.st_size > MAX_ARTIFACT:
             raise _Stop("ERROR", "output larger than 64 MiB")
         h, size = hashlib.sha256(), 0
         tmp = os.path.join(artifacts, f".tmp-{os.getpid()}-{os.path.basename(src_file)}")
