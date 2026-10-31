@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from conftest import genesis_raw
 
 from matrix.net import PeerClient, _is_loopback, make_app
 from matrix.node import _fault, _parser, main
@@ -320,3 +321,98 @@ async def test_log_is_never_served_to_another_machine(api, monkeypatch):
     assert b"secret" not in await response.read()
     # the votes stay public: anyone must be able to recount them
     assert (await client.get(f"/v1/requests/{RID}/bundle")).status == 200
+
+
+@pytest.mark.asyncio
+async def test_large_multi_chunk_download_arrives_whole(api):
+    # StreamReader.read(n) returns as soon as *some* bytes arrived; a real Go binary (MiBs)
+    # used to come back truncated, never hashed to h, and release waited forever.
+    client, _, store, tmp = api
+    address = f"{client.make_url('/').host}:{client.make_url('/').port}"
+    me = SimpleNamespace(id="builder1")
+    peer = SimpleNamespace(id="builder2", addr=address)
+    g = SimpleNamespace(nodes=[me, peer], node=lambda node_id: peer if node_id == peer.id else me)
+    blob = bytes(range(256)) * (12 * 1024)  # 3 MiB
+    artifact = tmp / "artifact"
+    artifact.write_bytes(blob)
+    store.path = str(artifact)
+    peers = PeerClient(g, me)
+    try:
+        assert await peers.get_bytes("builder2", f"/v1/artifacts/{HASH}", 64 << 20) == blob
+        assert await peers.get_bytes("builder2", f"/v1/artifacts/{HASH}", len(blob) - 1) is None
+    finally:
+        await peers.close()
+
+
+@pytest.mark.asyncio
+async def test_post_bodies_are_read_whole_and_capped(api):
+    client, engine, _, _ = api
+
+    async def chunks(parts):
+        for p in parts:
+            yield p
+
+    response = await client.post("/v1/requests", data=chunks([b"a" * 2000, b"b" * 2000]))
+    assert response.status == 202 and engine.requests[-1] == b"a" * 2000 + b"b" * 2000
+    response = await client.post("/v1/requests", data=chunks([b"a" * 3000, b"b" * 1200]))
+    assert response.status == 413
+
+
+@pytest.mark.asyncio
+async def test_peer_address_comes_from_the_book_first(genesis, keys, clock):
+    from matrix.discovery import AddressBook, make_hello
+
+    raw = genesis_raw()
+    del raw["nodes"][1]["addr"]  # builder2: ceremony-style, no address in genesis
+    from matrix.genesis import parse_genesis
+
+    g = parse_genesis(raw)
+    peers = PeerClient(g, g.node("builder1"), AddressBook(g, clock))
+    try:
+        assert peers._url("builder2", "/x") is None  # unreachable until its hello arrives
+        assert peers._url("builder3", "/x") == "http://127.0.0.1:7702/x"  # genesis fallback
+        hello = make_hello(g, g.node("builder2"), keys["builder2"], "192.168.43.17:7700", 1)
+        assert peers.book.accept(hello) is not None
+        assert peers._url("builder2", "/x") == "http://192.168.43.17:7700/x"
+        moved = make_hello(g, g.node("builder2"), keys["builder2"], "192.168.43.99:7700", 2)
+        peers.book.accept(moved)  # DHCP gave it a new IP: used immediately
+        assert peers._url("builder2", "/x") == "http://192.168.43.99:7700/x"
+        assert peers._url("builder1", "/x") is None  # never itself
+    finally:
+        await peers.close()
+
+
+@pytest.mark.asyncio
+async def test_peers_route_serves_the_book(tmp_path, genesis, keys, clock):
+    from matrix.discovery import AddressBook, make_hello
+
+    book = AddressBook(genesis, clock)
+    book.accept(make_hello(genesis, genesis.node("builder2"), keys["builder2"], "10.0.0.2:7700", 1))
+    env = SimpleNamespace(data_dir=str(tmp_path))
+    me = genesis.node("builder1")
+    for b, expected in ((book, book.hellos()), (None, [])):
+        client = TestClient(TestServer(make_app(FakeEngine(), None, genesis, me, env, b)))
+        await client.start_server()
+        try:
+            body = await (await client.get("/v1/peers")).json()
+            assert body == {"now": 100.0, "hellos": expected}
+        finally:
+            await client.close()
+
+
+@pytest.mark.parametrize(
+    "advertise", ["laptop-a:7700", "10.0.0.1", "10.0.0.300:7700", "[::1]:7700"]
+)
+def test_node_rejects_a_bad_advertise_address(tmp_path, capsys, advertise):
+    argv = ["--genesis", "missing", "--id", "builder1", "--key", "missing"]
+    argv += ["--listen", "0.0.0.0:7700", "--data", str(tmp_path), "--advertise", advertise]
+    assert main(argv) == 2
+    assert "--advertise must be <IPv4>:<port>" in capsys.readouterr().err
+
+
+def test_node_discovery_flags_parse():
+    base = ["--genesis", "g", "--id", "b", "--key", "k", "--listen", "0.0.0.0:7700", "--data", "d"]
+    args = _parser().parse_args(base)
+    assert args.advertise is None and args.no_discovery is False
+    args = _parser().parse_args([*base, "--advertise", "10.77.0.1:7700", "--no-discovery"])
+    assert args.advertise == "10.77.0.1:7700" and args.no_discovery is True

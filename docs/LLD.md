@@ -369,6 +369,7 @@ class PeerClient:
     async def broadcast_request(self, env: dict) -> None   # fire-and-forget tasks
     async def broadcast_attest(self, env: dict, only: list[str] | None = None) -> None
     async def get_json(self, node_id: str, path: str) -> Any | None   # None on any error
+    async def get_json_at(self, url: str) -> Any | None    # explicit URL (the CLI's local builder)
     async def get_bytes(self, node_id: str, path: str, limit: int) -> bytes | None
     async def close(self) -> None
 ```
@@ -446,7 +447,8 @@ def params_hash(params: dict) -> str           # sha256_hex(canonical_json(param
 def default_name() -> str                      # hostname rule below
 def founder_bytes(network_id: str, unsigned: dict) -> bytes
     # FOUNDER_PREFIX + network_id.encode("ascii") + b"\0" + canonical_json(unsigned)
-def make_founder(params: dict, name: str, sk, release_pubkey: str) -> bytes
+def make_founder(params: dict, name: str, sk, release_sk) -> bytes
+    # body.release_sig: release_sk signs founder_bytes(network_id, {pubkey, release_pubkey})
 def parse_founder(data: bytes, network_id: str) -> Founder | None           # never raises
 def seal_problem(params: dict, founders: Sequence[Founder], me_pubkey: str) -> str | None
 def ceremony_genesis(params: dict, founders: Sequence[Founder]) -> dict     # raw genesis
@@ -460,7 +462,7 @@ def check_endorsements(g: Genesis, envs: Iterable[Any]) -> bool
 - `load_network`: `tomllib`; top-level keys exactly `{network}`; `[network]` keys exactly `{name, allowed_repos, allowed_images, allowed_goos, allowed_goarch, build_timeout_s, request_ttl_s, sync_interval_s}`; `name` matches `[A-Za-z0-9_.-]{1,64}` (the genesis `network_id` rule); lists of `str`, `allowed_images` a table of `str`, ints `type(x) is int`. Value rules are left to `parse_genesis` on the built genesis.
 - `default_name`: `socket.gethostname().lower()`, every character outside `[a-z0-9_-]` replaced by `-`, cut to 24. Names (also `--name`) must match `[A-Za-z0-9_-]{1,24}`.
 - Founder signature: `sk.sign(founder_bytes(network_id, unsigned)).signature.hex()`, verified with `nacl.signing.VerifyKey` inside `try`. The separate prefix means a founder signature can never be replayed as an envelope, and the reverse.
-- `parse_founder`: `len(data) <= MAX_CEREMONY`; `loads_strict`; keys exactly `{v, type, signer, body, sig}`; `v` 1; `type == "founder"`; body keys exactly `{network_id, id, pubkey, release_pubkey, params_hash}`; `body.network_id == network_id` (other networks on the hotspot are ignored); `id` matches the name rule; `signer`, `pubkey`, `release_pubkey`, `params_hash` 64 lowercase hex; `signer == body.pubkey`; `release_pubkey != pubkey`; signature verifies with `signer` (proof of possession).
+- `parse_founder`: `len(data) <= MAX_CEREMONY`; `loads_strict`; keys exactly `{v, type, signer, body, sig}`; `v` 1; `type == "founder"`; body keys exactly `{network_id, id, pubkey, release_pubkey, release_sig, params_hash}`; `body.network_id == network_id` (other networks on the hotspot are ignored); `id` matches the name rule; `signer`, `pubkey`, `release_pubkey`, `params_hash` 64 lowercase hex; `signer == body.pubkey`; `release_pubkey != pubkey`; `release_sig` verifies with `release_pubkey` over `founder_bytes(network_id, {pubkey, release_pubkey})` (a founder cannot claim someone else's release key, L49); the signature verifies with `signer` (proof of possession).
 - `parse_endorse`: `len(data) <= MAX_CEREMONY`; exact envelope keys; `type == "endorse"`; body keys exactly `{genesis_hash}`, 64 hex; `pubkeys[signer]` exists; `crypto.verify(pubkey, body.genesis_hash, unsigned, sig)`. It is verified with the hash it carries, so an endorsement that arrives before the local seal is kept; it counts only if that hash equals ours (L42).
 - `seal_problem` returns a reason, or `None` to allow the seal: at least 4 founders; unique ids; every `params_hash == params_hash(params)`; `me_pubkey` listed; `parse_genesis(ceremony_genesis(...))` succeeds.
 - `ceremony_genesis` (deterministic: same founders and `network.toml` → byte-identical canonical genesis → same hash on every laptop): `n = len(founders)`, `f = n // 4`, `replicas = n`, `threshold = f + 1`; `network_id = params["name"]`; the other seven parameters copied from `params`; `nodes` sorted by `pubkey` as `{id, operator: id, pubkey}` (no `addr`); `release_signers` sorted by their `pubkey` as `{id: id + "-rel", pubkey: release_pubkey}`.
@@ -602,7 +604,7 @@ Exactly these keys, no others (§3.10a `load_network`). `params_hash = sha256_he
 | Type | Signer | Body | Signed bytes | Max |
 |---|---|---|---|---|
 | `hello` | node id | `{genesis_hash, addr: "<IPv4>:<port>", seq: <int, unix ms>}` | `SIG_PREFIX + genesis_hash + b"\0" + canonical_json(unsigned)` | 512 |
-| `founder` | node pubkey hex | `{network_id, id: <name>, pubkey, release_pubkey, params_hash}` | `FOUNDER_PREFIX + network_id + b"\0" + canonical_json(unsigned)`, node key | 1024 |
+| `founder` | node pubkey hex | `{network_id, id: <name>, pubkey, release_pubkey, release_sig, params_hash}` | `FOUNDER_PREFIX + network_id + b"\0" + canonical_json(unsigned)`, node key | 1024 |
 | `endorse` | node id | `{genesis_hash}` | `SIG_PREFIX + genesis_hash + b"\0" + canonical_json(unsigned)` | 1024 |
 
 Every message is `{"v": 1, "type", "signer", "body", "sig": <128 hex>}`, `unsigned = {v, type, signer, body}`. Example hello:
@@ -701,6 +703,11 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L45 | `--node HOST:PORT` (default `$MATRIX_NODE`, else `127.0.0.1:7700`) is the local builder for `release`, `status`, `evidence` and `tui`, replacing `tui --node NODE_ID`; the CLI calls `/v1/peers` only if some genesis node has no `addr` |
 | L46 | The discovery socket binds `0.0.0.0:7788` with `SO_BROADCAST` and `SO_REUSEADDR`; a bind failure refuses start; the local harness runs nodes with `--no-discovery` and static addrs |
 | L47 | Ceremony `release_signers` are sorted by their own `pubkey` (the release key), `nodes` by the node key |
+| L48 | Every HTTP body (server POSTs and client downloads) is read to EOF in chunks with a cap (`net._read_capped`); `StreamReader.read(n)` returns as soon as *some* bytes arrived, which truncated multi-chunk artifacts so `release` never certified |
+| L49 | The founder message carries `release_sig`, a signature by the release key over `founder_bytes(network_id, {pubkey, release_pubkey})`, so a founder cannot list someone else's release key as its own |
+| L50 | `local_ip()` tries `255.255.255.255:7788`, then `192.0.2.1:9` (TEST-NET-1, follows the default route); loopback and `0.0.0.0` count as no address. UDP `connect` sends nothing |
+| L51 | The CLI's `ClientBook` maps the local builder's genesis id (from `--node`'s `/v1/health`) to the `--node` address, so its loopback-only routes (the log) work; every other builder comes from verified hellos or genesis `addr`. `release` POSTs resolve through the same book |
+| L52 | The ceremony takes an injected bus and `ask(kind)` (`"seal"` / `"confirm"`); production uses UDP and a daemon stdin thread (an interrupted ceremony never waits for Enter on exit); tests run four ceremonies in memory |
 
 ## 11. Tests
 
@@ -718,10 +725,10 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | `tests/test_protocol.py` | `Engine` with a fake `build` and fake `PeerClient`: requests queue in order (never shed), settled requests are not built, persist-before-broadcast, restart re-sends without rebuilding, evidence kinds |
 | `tests/test_verify.py` | Wrong genesis, unsigned request, wrong repo, wrong tag, wrong commit, too few attestations, swapped file → correct exit codes |
 | `tests/test_discovery.py` | Hello round-trip; each receiver check rejects in order: over 512 bytes, duplicate keys, extra or missing keys, wrong `type`, bad `addr` or `seq`, unknown signer, foreign `genesis_hash`, replay (`seq` equal or lower), bad signature; a stranger's key is rejected before signature work; random mutations never raise. `AddressBook`: `update` reports new or changed address, highest seq wins, online exactly within 15 s on an injected clock, `hellos()` latest per node. `Discovery` with a fake transport: fresh seq per hello, own hello in the book, unicast reply on a new address, `--advertise` used verbatim |
-| `tests/test_ceremony.py` | `load_network` exact keys and types; `params_hash` stable; `parse_founder` rejects wrong network, `signer != pubkey`, bad self-signature, bad name, oversize; deterministic genesis: same founders in any arrival order → byte-identical canonical genesis and hash, f = n // 4, sorted nodes and signers, no `addr`; `short_code` format; seal refused with < 4 founders, duplicate ids or a params mismatch; unanimity: n − 1 endorsements not active, n active; an endorsement for another hash aborts; timeout aborts and writes nothing (fake sockets, injected clock) |
+| `tests/test_up.py`, `tests/test_discovery.py` | `load_network` exact keys and types; `params_hash` stable; `parse_founder` rejects wrong network, `signer != pubkey`, bad self-signature, bad name, oversize; deterministic genesis: same founders in any arrival order → byte-identical canonical genesis and hash, f = n // 4, sorted nodes and signers, no `addr`; `short_code` format; seal refused with < 4 founders, duplicate ids or a params mismatch; unanimity: n − 1 endorsements not active, n active; an endorsement for another hash aborts; timeout aborts and writes nothing (fake sockets, injected clock) |
 | `tests/test_net.py` | Every route and status code in openapi.yaml, plus `/v1/peers` and the log route returning 404 to a non-loopback caller; `PeerClient` prefers the book address over genesis `addr` and skips a node with neither |
 | `tests/test_cli.py` | `release`, `status`, `evidence` against a test server; address resolution via `/v1/peers` drops forged or foreign hellos; `release` keeps submitting until f+1 distinct operators accepted, online first, else exit 4; `up` with fake sockets: ceremony then node start, later run skips the ceremony, pin mismatch → 4 |
-| `tests/integration/test_matrix.py` (marked `integration`) | 4 local builders (`--nodes 4 --addrs local`, demo profile, `--no-discovery`), real Docker, RFC §9.1 fault matrix for f = 1: each fault mode on one builder still gives the honest verdict; 1 faulty + 1 offline certifies; 3 offline stays `PENDING` |
+| `tests/integration/test_matrix.py` (marked `integration`) | 8 local builders (f = 2, as before) and 4 local builders (`--nodes 4 --addrs local`, demo profile, `--no-discovery`), real Docker, RFC §9.1 fault matrix for f = 1: each fault mode on one builder still gives the honest verdict; 1 faulty + 1 offline certifies; 3 offline stays `PENDING` |
 
 Run with `pytest -q` (unit) and `pytest -q -m integration` (needs Docker and network).
 
@@ -737,7 +744,7 @@ python scripts/dev_genesis.py --out dev --addrs compose|local --profile demo|ful
 
 It writes `dev/genesis.json`, `dev/genesis.sha256`, `dev/keys/builder1..8.key` and `dev/keys/release.key` (signer id `ci-release`). Operators are `laptopA..D`, two builders each. Addresses: `compose` → `builderN:7700`; `local` → `127.0.0.1:770(N-1)`. Profiles: `demo` = `build_timeout_s 45, sync_interval_s 5`; `full` = `150, 10`; both `request_ttl_s 3600`.
 
-Dev genesis keeps **static `addr`s**: it is for development and rehearsal on one machine, not for the laptop network (that genesis comes from `matrix up`, §3.13). Planned (backlog R6): `--nodes 4`, a 4-builder profile matching the laptop network (`builder1..4`, one per operator `laptopA..D`, f = 1, replicas 4, threshold 2); the default stays 8 builders, f = 2.
+Dev genesis keeps **static `addr`s**: it is for development and rehearsal on one machine, not for the laptop network (that genesis comes from `matrix up`, §3.13). `--nodes 4` gives a 4-builder profile matching the laptop network (`builder1..4`, one per operator `laptopA..D`, f = 1, replicas 4, threshold 2); the default stays 8 builders, f = 2.
 
 The local integration harness (`tests/integration/harness.py`) starts every node with `--no-discovery`, so tests use only the static addrs and never broadcast onto the LAN.
 
@@ -751,5 +758,6 @@ To get the single-platform digest: `docker buildx imagetools inspect golang:1.23
 - Containers run as `MATRIX_UID:MATRIX_GID` with the host `docker` group added, so `--user <uid>:<gid>` and `rm -rf work/<id>` behave as on a laptop.
 - The `cli` service (profile `tools`) runs `matrix` inside the compose network, where `builderN:7700` resolves; pass `--node builder1:7700`. The log tail is loopback-only, so the TUI there shows no logs (use `docker compose logs` or the data dir).
 - [docker-compose.faults.yml](../docker-compose.faults.yml) is an override example that restarts chosen builders with fault flags for the demo scenes.
+- With a `--nodes 4` dev genesis, start only `builder1..4` (`docker compose up -d builder1 builder2 builder3 builder4`); builder5..8 are not in that genesis and would refuse to start.
 
 Mounting the Docker socket gives root-equivalent access to the host. This is for development only.

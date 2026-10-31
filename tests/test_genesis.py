@@ -54,6 +54,8 @@ BAD = {
     "addr no port": _set(["nodes", 0, "addr"], "127.0.0.1"),
     "addr port too big": _set(["nodes", 0, "addr"], "127.0.0.1:70000"),
     "addr bad host": _set(["nodes", 0, "addr"], "a b:7700"),
+    "addr explicit null": _set(["nodes", 0, "addr"], None),
+    "addr not a string": _set(["nodes", 0, "addr"], 7700),
     "repo not github": _set(["allowed_repos"], ["https://example.com/a/b"]),
     "repo trailing slash": _set(["allowed_repos"], ["https://github.com/a/b/"]),
     "repo http": _set(["allowed_repos"], ["http://github.com/a/b"]),
@@ -119,3 +121,19 @@ def test_load_rejects_unparsable_files(tmp_path, content):
 def test_load_missing_file(tmp_path):
     with pytest.raises(GenesisError):
         load_genesis(str(tmp_path / "missing.json"))
+
+
+def test_addr_is_optional(genesis_dict):
+    # ceremony genesis (RFC rev 5 §7.2): no addresses, members are found by signed hellos
+    for n in genesis_dict["nodes"]:
+        del n["addr"]
+    g = parse_genesis(genesis_dict)
+    assert all(n.addr is None for n in g.nodes)
+
+
+def test_addr_may_be_mixed_and_changes_the_hash(genesis_dict):
+    with_addr = parse_genesis(genesis_dict)
+    del genesis_dict["nodes"][0]["addr"]
+    g = parse_genesis(genesis_dict)
+    assert g.nodes[0].addr is None and g.nodes[1].addr == "127.0.0.1:7701"
+    assert g.hash != with_addr.hash  # why addresses must not live in a real network's genesis

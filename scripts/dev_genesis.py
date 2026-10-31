@@ -1,4 +1,7 @@
-"""Generate a disposable eight-builder genesis and its private development keys."""
+"""Generate a disposable development genesis (8 or 4 builders) and its private keys.
+
+Development only: one machine holds every key. A real network is founded with `matrix up`.
+"""
 
 import argparse
 import hashlib
@@ -34,25 +37,29 @@ def new_key(path: Path) -> str:
     return key.verify_key.encode().hex()
 
 
-def generate(out: Path, addrs: str, profile: str, repos: list[str], image: str) -> None:
+def generate(
+    out: Path, addrs: str, profile: str, repos: list[str], image: str, nodes: int = 8
+) -> None:
+    """`nodes` 8: two builders per laptopA..D, f = 2. `nodes` 4: one per laptop, f = 1 (rev 5)."""
+    per_operator = nodes // 4
     out.mkdir(parents=True, exist_ok=True)
     keys_dir = out / "keys"
     keys_dir.mkdir(mode=0o700, exist_ok=True)
     os.chmod(keys_dir, 0o700)
 
     # A rerun must not silently replace a key used by an existing genesis.
-    key_paths = [keys_dir / f"builder{i}.key" for i in range(1, 9)]
+    key_paths = [keys_dir / f"builder{i}.key" for i in range(1, nodes + 1)]
     key_paths.append(keys_dir / "release.key")
     if any(path.exists() for path in key_paths):
         raise FileExistsError(f"key files already exist in {keys_dir}; choose a fresh --out")
 
-    nodes = []
-    for number, key_path in enumerate(key_paths[:8], start=1):
+    entries = []
+    for number, key_path in enumerate(key_paths[:nodes], start=1):
         addr = f"builder{number}:7700" if addrs == "compose" else f"127.0.0.1:{7699 + number}"
-        nodes.append(
+        entries.append(
             {
                 "id": f"builder{number}",
-                "operator": f"laptop{'ABCD'[(number - 1) // 2]}",
+                "operator": f"laptop{'ABCD'[(number - 1) // per_operator]}",
                 "addr": addr,
                 "pubkey": new_key(key_path),
             }
@@ -60,9 +67,9 @@ def generate(out: Path, addrs: str, profile: str, repos: list[str], image: str) 
 
     genesis = {
         "network_id": "matrix-dev",
-        "f": 2,
-        "replicas": 8,
-        "threshold": 3,
+        "f": nodes // 4,
+        "replicas": nodes,
+        "threshold": nodes // 4 + 1,
         "build_timeout_s": 45 if profile == "demo" else 150,
         "request_ttl_s": 3600,
         "sync_interval_s": 5 if profile == "demo" else 10,
@@ -70,8 +77,8 @@ def generate(out: Path, addrs: str, profile: str, repos: list[str], image: str) 
         "allowed_images": {"go1.23": image},
         "allowed_goos": ["linux", "darwin", "windows"],
         "allowed_goarch": ["amd64", "arm64"],
-        "release_signers": [{"id": "ci-release", "pubkey": new_key(key_paths[8])}],
-        "nodes": nodes,
+        "release_signers": [{"id": "ci-release", "pubkey": new_key(key_paths[nodes])}],
+        "nodes": entries,
     }
     canonical = json.dumps(
         genesis,
@@ -106,8 +113,11 @@ def main() -> None:
         required=True,
         help="pinned linux/amd64 single-platform Go image digest",
     )
+    parser.add_argument(
+        "--nodes", type=int, choices=(4, 8), default=8, help="8 (f = 2) or 4 (one per laptop)"
+    )
     args = parser.parse_args()
-    generate(args.out, args.addrs, args.profile, args.repo, args.image)
+    generate(args.out, args.addrs, args.profile, args.repo, args.image, args.nodes)
 
 
 if __name__ == "__main__":

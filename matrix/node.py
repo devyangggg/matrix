@@ -25,6 +25,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--key", required=True)
     parser.add_argument("--listen", required=True)
     parser.add_argument("--data", required=True)
+    parser.add_argument("--advertise", help="address put in hellos, <IPv4>:<port>")
+    parser.add_argument(
+        "--no-discovery", action="store_true", help="no hellos; reach peers by genesis addr only"
+    )
     parser.add_argument("--allow-faults", action="store_true")
     parser.add_argument("--fault", choices=_MODES)
     parser.add_argument("--patch")
@@ -59,8 +63,14 @@ def _listen(address: str) -> tuple[str, int]:
 
 
 async def run(args: argparse.Namespace) -> None:
+    from matrix.discovery import AddressBook, Discovery, valid_addr
+
     fault = _fault(args)
     host, port = _listen(args.listen)
+    advertise = getattr(args, "advertise", None)
+    discovery = not getattr(args, "no_discovery", False)
+    if advertise is not None and not valid_addr(advertise):
+        raise ValueError("--advertise must be <IPv4>:<port>")
     from matrix.builder import BuildEnv, cleanup_startup, expire_artifacts
     from matrix.crypto import load_key, pubkey_hex
     from matrix.genesis import load_genesis
@@ -79,7 +89,8 @@ async def run(args: argparse.Namespace) -> None:
         (data_dir / subdir).mkdir(parents=True, exist_ok=True)
     env = BuildEnv(str(data_dir), me.id, os.getuid(), os.getgid())
     store = Store(str(data_dir / "matrix.db"))
-    peers = PeerClient(g, me)
+    book = AddressBook(g)
+    peers = PeerClient(g, me, book)
     runner = None
     tasks = []
     stop_waiter = None
@@ -88,7 +99,7 @@ async def run(args: argparse.Namespace) -> None:
         expire_artifacts(env, time.time())
         engine = Engine(g, me, sk, store, peers, env, fault)
         await engine.recover()
-        runner = web.AppRunner(make_app(engine, store, g, me, env))
+        runner = web.AppRunner(make_app(engine, store, g, me, env, book))
         await runner.setup()
         site = web.TCPSite(runner, host, port)
         await site.start()
@@ -96,6 +107,8 @@ async def run(args: argparse.Namespace) -> None:
             asyncio.create_task(engine.build_worker()),
             asyncio.create_task(engine.sync_loop()),
         ]
+        if discovery:  # a bind failure ends this task and the node stops (RFC §7.15)
+            tasks.append(asyncio.create_task(Discovery(g, me, sk, book, port, advertise).run()))
         logging.getLogger(__name__).info("%s listening at %s:%d", me.id, host, port)
         stopped = asyncio.Event()
         loop = asyncio.get_running_loop()

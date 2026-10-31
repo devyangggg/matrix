@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 
 import pytest
@@ -35,6 +36,8 @@ class NodeState:
     evidence: list = field(default_factory=list)
     posted: list = field(default_factory=list)
     artifact_gets: int = 0
+    health: dict | None = None  # GET /v1/health (only when this server plays the local builder)
+    peers: dict | None = None  # GET /v1/peers
 
 
 def _app(st: NodeState) -> web.Application:
@@ -73,6 +76,15 @@ def _app(st: NodeState) -> web.Application:
     app.router.add_get("/v1/requests/{id}/bundle", bundle)
     app.router.add_get("/v1/artifacts/{sha}", artifact)
     app.router.add_get("/v1/evidence", evidence)
+
+    async def health(r: web.Request) -> web.Response:
+        return web.json_response(st.health) if st.health else down()
+
+    async def peers(r: web.Request) -> web.Response:
+        return web.json_response(st.peers) if st.peers else down()
+
+    app.router.add_get("/v1/health", health)
+    app.router.add_get("/v1/peers", peers)
     return app
 
 
@@ -97,15 +109,37 @@ class Net:
     def serve(self, nid: str, data: bytes = BINARY) -> None:
         self.node(nid).artifacts[H] = data
 
-    def run(self, *args: str) -> int:
-        return cli.run(["--genesis", str(self.gpath), *args])
+    def run(self, *args: str, node: str = "127.0.0.1:1") -> int:
+        # --node: port 1 refuses at once, so no test depends on a builder running on this machine
+        return cli.run(["--genesis", str(self.gpath), "--node", node, *args])
 
-    def release(self, *extra: str, key: str = "ci-release", wait: str = "5") -> int:
+    def addr(self, nid: str) -> str:
+        return self.g.node(nid).addr
+
+    def found_without_addresses(self) -> dict[str, str]:
+        """Switch to a ceremony-style genesis (no addr); return the real address of each node."""
+        addrs = {n.id: n.addr for n in self.g.nodes}
+        raw = genesis_raw()
+        for n in raw["nodes"]:
+            del n["addr"]
+        self.gpath = self.tmp / "genesis-founded.json"
+        self.gpath.write_bytes(canonical_json(raw))
+        self.g = parse_genesis(raw)
+        return addrs
+
+    def serve_peers(self, local: str, hellos: list[dict]) -> None:
+        st = self.node(local)
+        st.health = {"node_id": local, "genesis_hash": self.g.hash, "version": "0.1.0", "now": 1}
+        st.peers = {"now": time.time(), "hellos": hellos}
+
+    def release(
+        self, *extra: str, key: str = "ci-release", wait: str = "5", node: str = "127.0.0.1:1"
+    ) -> int:
         kpath = self.tmp / f"{key}.key"
         kpath.write_text(seed_for(key).hex() + "\n")
         args = ["release", "--repo", REPO, "--tag", "v1.2.0", "--commit", COMMIT]
         args += ["--key", str(kpath), "--wait", wait, "--out", str(self.tmp / "dist")]
-        return self.run(*args, *extra)
+        return self.run(*args, *extra, node=node)
 
 
 @pytest.fixture
@@ -428,3 +462,68 @@ def test_check_proof(net):
     assert not cli.check_proof({**ev, "request_id": "0" * 64}, net.g)
     assert not cli.check_proof({**ev, "proof": None}, net.g)
     assert not cli.check_proof({**ev, "proof": [{"sig": "x"}, 3]}, net.g)
+
+
+# address discovery (RFC rev 5 §7.15): no addresses in genesis, the local builder knows them
+
+
+def _hellos(net: Net, addrs: dict[str, str], nodes=ALL) -> list[dict]:
+    from matrix.discovery import make_hello
+
+    seq = int(time.time() * 1000)
+    return [
+        loads_strict(make_hello(net.g, net.g.node(n), net.keys[n], addrs[n], seq)) for n in nodes
+    ]
+
+
+def test_release_finds_builders_through_the_local_node(net):
+    addrs = net.found_without_addresses()
+    net.serve_peers("builder1", _hellos(net, addrs))
+    net.attest(dict.fromkeys(ALL, H))
+    net.serve("builder4")
+    assert net.release(node=addrs["builder1"]) == 0
+    assert [nid for nid in ALL if net.node(nid).posted] == ["builder1", "builder3", "builder5"]
+
+
+def test_forged_or_foreign_hellos_are_not_used(net):
+    from matrix.discovery import make_hello
+
+    addrs = net.found_without_addresses()
+    hellos = _hellos(net, addrs, nodes=["builder1", "builder2", "builder4", "builder6"])
+    # builder3's and builder5's entries point at builder8's server: signed with the wrong key
+    for victim in ("builder3", "builder5"):
+        forged = make_hello(
+            net.g, net.g.node(victim), net.keys["builder8"], addrs["builder8"], 10**13
+        )
+        hellos.append(loads_strict(forged))
+    net.serve_peers("builder1", hellos)
+    net.attest(dict.fromkeys(ALL, H), on=["builder1", "builder2", "builder4", "builder6"])
+    net.serve("builder2")
+    assert net.release(node=addrs["builder1"]) == 0
+    assert net.node("builder8").posted == []  # never redirected to the forger's choice
+    # laptopA, laptopB via builder4, laptopC via builder6: builders without a verified hello
+    # are unreachable, and the next node of the same operator is used instead
+    assert [nid for nid in ALL if net.node(nid).posted] == ["builder1", "builder4", "builder6"]
+
+
+def test_release_without_a_local_node_explains_itself(net, capsys):
+    net.found_without_addresses()
+    net.attest(dict.fromkeys(ALL, H))
+    assert net.release() == 4
+    assert "is `matrix up` running" in capsys.readouterr().err
+
+
+def test_bad_node_flag(net):
+    assert net.run("status", RID, node="not an address") == 4
+
+
+def test_release_key_defaults_to_the_laptop_key(net, monkeypatch):
+    home = net.tmp / "laptop"
+    (home / ".matrix" / "keys").mkdir(parents=True)
+    (home / ".matrix" / "keys" / "release.key").write_text(seed_for("ci-release").hex() + "\n")
+    monkeypatch.setenv("HOME", str(home))
+    net.attest(dict.fromkeys(ALL, H))
+    net.serve("builder1")
+    args = ["release", "--repo", REPO, "--tag", "v1.2.0", "--commit", COMMIT]
+    args += ["--wait", "5", "--out", str(net.tmp / "dist")]
+    assert net.run(*args) == 0

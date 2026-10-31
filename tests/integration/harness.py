@@ -1,4 +1,4 @@
-"""Start eight real local matrix-node processes with disposable identities and data."""
+"""Start real local matrix-node processes (8, or 4 with f = 1) with disposable identities."""
 
 import asyncio
 import json
@@ -20,8 +20,10 @@ class Network:
         directory: Path,
         faults: dict[str, list[str]] | None = None,
         offline: set[str] | None = None,
+        nodes: int = 8,
     ):
         self.directory = directory
+        self.nodes = nodes
         self.faults = faults or {}
         self.offline = offline or set()
         self.processes: dict[str, asyncio.subprocess.Process] = {}
@@ -44,6 +46,8 @@ class Network:
             REPO,
             "--image",
             IMAGE,
+            "--nodes",
+            str(self.nodes),
             stderr=asyncio.subprocess.PIPE,
         )
         _, error = await generator.communicate()
@@ -52,7 +56,7 @@ class Network:
         self.genesis = json.loads((self.directory / "dev" / "genesis.json").read_text())
         self.session = ClientSession(timeout=ClientTimeout(total=2))
         try:
-            for index in range(1, 9):
+            for index in range(1, self.nodes + 1):
                 node_id = f"builder{index}"
                 if node_id in self.offline:
                     continue
@@ -72,6 +76,7 @@ class Network:
                     f"127.0.0.1:{7699 + index}",
                     "--data",
                     str(self.directory / node_id),
+                    "--no-discovery",  # static dev addrs; tests never broadcast onto the LAN
                 ]
                 if node_id in self.faults:
                     command += ["--allow-faults", *self.faults[node_id]]

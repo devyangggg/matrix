@@ -13,7 +13,7 @@ class GenesisError(Exception):
 class Node:
     id: str
     operator: str
-    addr: str  # "host:port"
+    addr: str | None  # "host:port"; optional: ceremony genesis has none (found by hellos)
     pubkey: str
 
 
@@ -77,10 +77,13 @@ def _str_list(raw: dict, key: str, rx: re.Pattern) -> tuple[str, ...]:
     return tuple(v)
 
 
-def _dict_list(raw: dict, key: str, keys: set[str]) -> list[dict]:
+def _dict_list(raw: dict, key: str, *allowed: set[str]) -> list[dict]:
     v = raw[key]
     _need(isinstance(v, list) and len(v) > 0, f"{key} must be a non-empty list")
-    _need(all(isinstance(x, dict) and set(x) == keys for x in v), f"{key} entries need {keys}")
+    _need(
+        all(isinstance(x, dict) and set(x) in allowed for x in v),
+        f"{key} entries need exactly one of {[sorted(a) for a in allowed]}",
+    )
     return v
 
 
@@ -102,7 +105,13 @@ def parse_genesis(raw: dict) -> Genesis:
     )
 
     signers = tuple(Signer(**s) for s in _dict_list(raw, "release_signers", {"id", "pubkey"}))
-    nodes = tuple(Node(**n) for n in _dict_list(raw, "nodes", {"id", "operator", "addr", "pubkey"}))
+    # addr is optional (RFC rev 5 §7.2): addresses are not security relevant, and an IP inside
+    # genesis would change the network's hash whenever DHCP does.
+    node_keys = ({"id", "operator", "pubkey"}, {"id", "operator", "addr", "pubkey"})
+    nodes = tuple(
+        Node(n["id"], n["operator"], n.get("addr"), n["pubkey"])
+        for n in _dict_list(raw, "nodes", *node_keys)
+    )
     ids = [x.id for x in signers + nodes]
     keys = [x.pubkey for x in signers + nodes]
     _need(all(_match(_ID, i) for i in ids), "ids must match [A-Za-z0-9_-]{1,32}")
@@ -111,8 +120,10 @@ def parse_genesis(raw: dict) -> Genesis:
     _need(len(set(keys)) == len(keys), "public keys must be distinct")
     for n in nodes:
         _need(_match(_NAME, n.operator), f"{n.id}: operator is invalid")
-        m = _ADDR.fullmatch(n.addr) if isinstance(n.addr, str) else None
-        _need(m is not None and int(m[1]) <= 65535, f"{n.id}: addr must be host:port")
+    for raw_node, n in zip(raw["nodes"], nodes):
+        if "addr" in raw_node:  # present means valid; an explicit null is rejected too
+            m = _ADDR.fullmatch(n.addr) if isinstance(n.addr, str) else None
+            _need(m is not None and int(m[1]) <= 65535, f"{n.id}: addr must be host:port")
 
     f, n_nodes = raw["f"], len(nodes)
     _need(n_nodes >= 4 * f, "need n >= 4f")
