@@ -168,11 +168,13 @@ class Engine:
             self.store.upsert_build(rid, error=outcome.reason, finished_at=self.clock())
 
     async def _attempt(self, req: Request, rid: str, attempt: int) -> builder.Outcome:
+        # asyncio.timeout, not wait_for: on 3.11 wait_for can swallow a cancel that races with
+        # the build finishing (CPython gh-86296), so the worker would never stop on shutdown.
         try:
-            return await asyncio.wait_for(
-                builder.build(req, rid, self.g, self.env, attempt, patch=self.fault.patch),
-                self.g.build_timeout_s,
-            )
+            async with asyncio.timeout(self.g.build_timeout_s):
+                return await builder.build(
+                    req, rid, self.g, self.env, attempt, patch=self.fault.patch
+                )
         except TimeoutError:
             return builder.Outcome("ERROR", None, None, "timeout")
         except Exception:
