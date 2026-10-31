@@ -37,7 +37,7 @@ _DURATION = re.compile(r"([0-9]{1,9})([smhd])", re.ASCII)
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 # Not a genesis node, so PeerClient (which skips `me`) reaches every builder.
-_CLIENT = Node(id="matrix-cli", operator="client", addr="localhost:0", pubkey="")
+CLIENT = Node(id="matrix-cli", operator="client", addr="localhost:0", pubkey="")
 
 
 def _out(msg: str) -> None:
@@ -275,7 +275,7 @@ async def _release(a: argparse.Namespace, g: Genesis, sk: Any) -> int:
     env = make_envelope("release", signer.id, body, sk, g)
     rid = request_id(body)
     _out(f"request {rid} {a.repo}@{a.tag}")
-    peers = PeerClient(g, _CLIENT)
+    peers = PeerClient(g, CLIENT)
     try:
         accepted = await asyncio.gather(*(_submit(peers, n, env) for n in _submit_targets(g)))
         if not any(accepted):
@@ -345,7 +345,7 @@ def cmd_status(a: argparse.Namespace) -> int:
 
 
 async def _status(rid: str, g: Genesis) -> int:
-    peers = PeerClient(g, _CLIENT)
+    peers = PeerClient(g, CLIENT)
     try:
         env = await fetch_request(peers, g, rid)
         if env is None:
@@ -400,7 +400,7 @@ async def gather_evidence(peers: PeerClient, g: Genesis, since: int) -> list[dic
 
 
 async def _evidence(since: int, g: Genesis) -> int:
-    peers = PeerClient(g, _CLIENT)
+    peers = PeerClient(g, CLIENT)
     try:
         items = await gather_evidence(peers, g, since)
     finally:
@@ -414,6 +414,22 @@ async def _evidence(since: int, g: Genesis) -> int:
     if not items:
         _out("no evidence")
     return EXIT_OK
+
+
+# tui
+
+
+def cmd_tui(a: argparse.Namespace) -> int:
+    g = _load(a)
+    if g is None:
+        return EXIT_ERROR
+    node = a.node or g.nodes[0].id
+    if g.node(node) is None:
+        _err(f"{node} is not a genesis node")
+        return EXIT_ERROR
+    from .tui import run_tui  # lazy: Textual is only needed for this command
+
+    return run_tui(g, node)
 
 
 # entry point
@@ -454,6 +470,10 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("evidence", help="evidence collected by all builders")
     s.add_argument("--since", default="1h")
     s.set_defaults(fn=cmd_evidence)
+
+    s = sub.add_parser("tui", help="live view of builders, releases and evidence")
+    s.add_argument("--node", help="builder to poll (default: first genesis node)")
+    s.set_defaults(fn=cmd_tui)
     return p
 
 
