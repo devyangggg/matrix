@@ -12,12 +12,12 @@ from dataclasses import dataclass, field
 
 import pytest
 from aiohttp import web
+from conftest import COMMIT, REPO, genesis_raw, seed_for
 
 from matrix import cli
 from matrix.canon import canonical_json, loads_strict
 from matrix.genesis import parse_genesis
 from matrix.model import make_envelope, request_id
-from tests.conftest import COMMIT, REPO, genesis_raw, seed_for
 
 BINARY = b"\x7fELF honest hello"
 H = hashlib.sha256(BINARY).hexdigest()

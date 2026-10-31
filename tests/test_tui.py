@@ -1,11 +1,11 @@
 """TUI polling (FakePeers) and the four screens, driven headless with Textual's pilot."""
 
 import pytest
+from fakes import FakePeers
 from textual.widgets import DataTable, Static
 
 from matrix.model import request_id
 from matrix.tui import MatrixTui, poll_evidence, poll_health, poll_log, poll_releases
-from tests.fakes import FakePeers
 
 H = "a" * 64
 OTHER = "e" * 64

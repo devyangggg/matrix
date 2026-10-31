@@ -8,13 +8,13 @@ import stat
 from types import SimpleNamespace
 
 import pytest
+from conftest import COMMIT, REPO, genesis_raw
 
 from matrix.canon import canonical_json
 from matrix.cli import run
 from matrix.crypto import load_key, pubkey_hex
 from matrix.genesis import parse_genesis
 from matrix.model import make_envelope
-from tests.conftest import COMMIT, REPO, genesis_raw
 
 BINARY = b"\x7fELF honest binary"
 H = hashlib.sha256(BINARY).hexdigest()
