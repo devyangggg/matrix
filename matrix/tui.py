@@ -261,7 +261,9 @@ async def poll_evidence(peers: PeerClient, node_id: str) -> list[dict]:
 
 async def poll_log(peers: PeerClient, node_id: str, rid: str) -> str:
     data = await peers.get_bytes(node_id, f"/v1/requests/{rid}/log", MAX_LOG)
-    return "(no log on this builder)" if data is None else data.decode("utf-8", "replace")
+    if data is None:  # also what a remote node answers: logs never leave their own laptop
+        return "(no log: logs are only readable on the builder's own laptop)"
+    return data.decode("utf-8", "replace")
 
 
 def _time(t: object) -> str:
