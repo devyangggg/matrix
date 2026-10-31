@@ -6,9 +6,12 @@ keeps nothing beyond the last poll result.
 """
 
 import asyncio
+import curses
 import json
+import os
 import re
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,7 +20,8 @@ from typing import ClassVar
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.containers import Horizontal, Vertical
+from textual.widgets import DataTable, Footer, Static
 
 from .cli import CLIENT, builder_rows, check_proof
 from .genesis import Genesis
@@ -28,6 +32,164 @@ from .verdict import Verdict, verdict
 MAX_RELEASES = 20  # newest first; bounds the per-second polling load
 MAX_LOG = 65536
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
+
+_COLORS = {
+    "background": "#000000",
+    "text": "#FFFFFF",
+    "muted": "#A0A0A0",
+    "blue": "#4287f5",
+    "green": "#7DD3C0",
+    "yellow": "#E6B86B",
+    "red": "#D68198",
+}
+_FONT = {
+    "M": ["#   #", "## ##", "# # #", "#   #", "#   #"],
+    "A": [" ### ", "#   #", "#####", "#   #", "#   #"],
+    "T": ["#####", "  #  ", "  #  ", "  #  ", "  #  "],
+    "R": ["#### ", "#   #", "#### ", "#  # ", "#   #"],
+    "I": ["#####", "  #  ", "  #  ", "  #  ", "#####"],
+    "X": ["#   #", " # # ", "  #  ", " # # ", "#   #"],
+}
+_TAGLINE = "R E L E A S E   O B S E R V A T O R Y"
+_INTRO_SECONDS = 2.0
+
+
+def _intro_colors() -> dict[str, int]:
+    """Curses uses the nearest palette colours; Textual uses truecolour when available."""
+    if not curses.has_colors():
+        return dict.fromkeys(("purple", "green", "muted", "fade1", "fade2", "text", "blue"), 0)
+    curses.start_color()
+    try:
+        curses.use_default_colors()
+        background = -1
+    except curses.error:
+        background = curses.COLOR_BLACK
+    palette = (
+        (183, curses.COLOR_MAGENTA),
+        (121, curses.COLOR_CYAN),
+        (245, curses.COLOR_WHITE),
+        (249, curses.COLOR_WHITE),
+        (252, curses.COLOR_WHITE),
+        (255, curses.COLOR_WHITE),
+        (69, curses.COLOR_BLUE),  # nearest 256-colour match to dashboard #4287f5
+    )
+    for pair, (indexed, basic) in enumerate(palette, 1):
+        curses.init_pair(pair, indexed if curses.COLORS >= 256 else basic, background)
+    return dict(
+        zip(
+            ("purple", "green", "muted", "fade1", "fade2", "text", "blue"),
+            (curses.color_pair(i) for i in range(1, 8)),
+        )
+    )
+
+
+def _put(win: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
+    rows, cols = win.getmaxyx()
+    if 0 <= y < rows and 0 <= x < cols:
+        try:
+            win.addstr(y, x, text[: cols - x], attr)
+        except curses.error:
+            pass  # Some terminals refuse to write their bottom-right cell.
+
+
+def _intro_frame(win: curses.window, elapsed: float, colors: dict[str, int]) -> None:
+    """Render one bounded frame; elapsed time determines the four animation phases."""
+    rows, cols = win.getmaxyx()
+    win.erase()
+    if cols < 42 or rows < 10:
+        label = "[ MATRIX ]"
+        _put(win, rows // 2, max(0, (cols - len(label)) // 2), label, colors["blue"])
+        return
+
+    sx, sy = (2 if cols >= 84 else 1), (2 if rows >= 20 else 1)
+    lines = [
+        (" ".join(_FONT[letter][row] for letter in "MATRIX"))
+        .replace("#", "█" * sx)
+        .replace(" ", " " * sx)
+        for row in range(5)
+    ]
+    width, height = len(lines[0]), 5 * sy
+    left, top = (cols - width) // 2, max(0, (rows - height - 3) // 2)
+    centre = cols // 2
+
+    if elapsed < 0.3:
+        extent = 1 + int((height - 1) * elapsed / 0.3)
+        bracket_top = top + (height - extent) // 2
+        bracket_left, bracket_right = centre - 1, centre
+    else:
+        extent, bracket_top = height, top
+        slide = min(1.0, max(0.0, (elapsed - 0.3) / 0.4))
+        slide = 1 - (1 - slide) ** 3
+        bracket_left = round(centre - 1 + (left - 2 - centre + 1) * slide)
+        bracket_right = round(centre + (left + width + 1 - centre) * slide)
+    for offset in range(extent):
+        if extent == 1:
+            lhs, rhs = "[", "]"
+        elif offset == 0:
+            lhs, rhs = "┌", "┐"
+        elif offset == extent - 1:
+            lhs, rhs = "└", "┘"
+        else:
+            lhs, rhs = "│", "│"
+        if elapsed >= 1.67:
+            stage = min(4, int((elapsed - 1.67) / 0.33 * 5))
+            lhs = rhs = ("▓", "▒", "░", " ", " ")[stage]
+        _put(win, bracket_top + offset, bracket_left, lhs, colors["purple"])
+        _put(win, bracket_top + offset, bracket_right, rhs, colors["purple"])
+
+    if elapsed < 0.3:
+        return
+    reveal = min(1.0, (elapsed - 0.3) / 0.82)
+    radius = (width / 2 + 1) * (1 - (1 - reveal) ** 3)
+    shimmer = (elapsed - 1.12) / 0.36 * (width + 4) - 2
+    for row, line in enumerate(lines):
+        for col, cell in enumerate(line):
+            if cell != "█" or abs(col - (width - 1) / 2) > radius:
+                continue
+            attr = colors["blue"]
+            if (elapsed < 1.12 and abs(abs(col - (width - 1) / 2) - radius) < 1.5) or (
+                1.12 <= elapsed < 1.48 and abs(col - shimmer) < 2
+            ):
+                attr = colors["green"]
+            y = top + row * sy
+            if elapsed >= 1.67:
+                progress = (elapsed - 1.67) / 0.33
+                stage = min(4, int(progress * 5 + ((col * 7 + row * 11) % 4) / 5))
+                cell = ("█", "▓", "▒", "░", " ")[stage]
+                y -= min(2, int(progress * 3))
+            for vertical in range(sy):
+                _put(win, y + vertical, left + col, cell, attr)
+
+    if 1.12 <= elapsed < 1.67:
+        step = min(3, int((elapsed - 1.12) / 0.36 * 4))
+        attr = colors[("muted", "fade1", "fade2", "text")[step]]
+        _put(win, top + height + 1, max(0, (cols - len(_TAGLINE)) // 2), _TAGLINE, attr)
+
+
+def _intro(win: curses.window) -> None:
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    win.nodelay(True)
+    win.keypad(True)
+    colors = _intro_colors()
+    start = time.monotonic()
+    while True:
+        if win.getch() != -1:  # Any key skips the intro, including on its first frame.
+            return
+        elapsed = time.monotonic() - start
+        if elapsed >= _INTRO_SECONDS:
+            return
+        try:
+            size = os.get_terminal_size(sys.stdout.fileno())
+            if (size.lines, size.columns) != win.getmaxyx():
+                curses.resizeterm(size.lines, size.columns)
+        except (OSError, curses.error):
+            pass  # The next frame still clips to curses' current bounds.
+        _intro_frame(win, elapsed, colors)
+        win.refresh()
+        time.sleep(min(0.035, _INTRO_SECONDS - elapsed))
 
 
 @dataclass(frozen=True)
@@ -109,16 +271,122 @@ def _time(t: object) -> str:
 
 
 def _verdict_text(v: Verdict) -> Text:
-    style = {"AGREED": "green", "PENDING": "yellow"}.get(v.state, "red")
+    style = {"AGREED": _COLORS["green"], "PENDING": _COLORS["yellow"]}.get(v.state, _COLORS["red"])
     label = f"AGREED {v.hash[:12]}" if v.state == "AGREED" else v.state
     return Text(label, style=style)
+
+
+def _styled(value: str, colour: str = "text") -> Text:
+    return Text(value, style=_COLORS[colour])
+
+
+def _divider(width: int, split: int) -> Text:
+    """A single blue rule whose centre joins the peers/requests separator."""
+    if width <= 0:
+        return _styled("", "blue")
+    join = max(0, min(width - 1, split))
+    return _styled("─" * join + "┴" + "─" * (width - join - 1), "blue")
 
 
 # the app
 
 
 class MatrixTui(App):
-    TITLE = "Matrix"
+    TITLE = "MATRIX"
+    CSS = f"""
+    Screen {{
+        background: {_COLORS["background"]};
+        color: {_COLORS["text"]};
+    }}
+    #dashboard {{
+        height: 1fr;
+        background: {_COLORS["background"]};
+        border: solid {_COLORS["blue"]};
+        border-title-color: {_COLORS["blue"]};
+    }}
+    #top {{
+        height: 52%;
+        min-height: 8;
+        background: {_COLORS["background"]};
+    }}
+    #peers-panel {{
+        width: 42%;
+        border-right: solid {_COLORS["blue"]};
+        background: {_COLORS["background"]};
+    }}
+    #requests-panel, #details-panel {{
+        width: 1fr;
+        background: {_COLORS["background"]};
+    }}
+    #details-panel {{
+        height: 1fr;
+    }}
+    .panel-title {{
+        height: 1;
+        padding: 0 1;
+        color: {_COLORS["blue"]};
+        background: {_COLORS["background"]};
+        text-style: bold;
+    }}
+    #divider {{
+        height: 1;
+        color: {_COLORS["blue"]};
+        background: {_COLORS["background"]};
+    }}
+    DataTable, #details, #extra {{
+        background: {_COLORS["background"]};
+        color: {_COLORS["text"]};
+        scrollbar-size: 0 0;
+    }}
+    DataTable, #details {{
+        height: 1fr;
+    }}
+    DataTable > .datatable--header {{
+        background: {_COLORS["background"]};
+        color: {_COLORS["blue"]};
+    }}
+    DataTable:focus {{
+        background-tint: {_COLORS["background"]} 0%;
+    }}
+    DataTable:focus > .datatable--header {{
+        background-tint: {_COLORS["background"]} 0%;
+    }}
+    DataTable:dark > .datatable--even-row {{
+        background: {_COLORS["background"]};
+    }}
+    DataTable > .datatable--even-row, DataTable > .datatable--odd-row,
+    DataTable > .datatable--cursor, DataTable:focus > .datatable--cursor,
+    DataTable > .datatable--fixed-cursor, DataTable > .datatable--header-cursor {{
+        background: {_COLORS["background"]};
+    }}
+    DataTable:focus > .datatable--cursor {{
+        color: {_COLORS["blue"]};
+        text-style: bold;
+    }}
+    #details {{
+        padding: 0 1;
+        overflow-y: auto;
+    }}
+    #extra {{
+        height: auto;
+        max-height: 40%;
+        padding: 0 1;
+        overflow-y: auto;
+        color: {_COLORS["muted"]};
+    }}
+    Footer, FooterKey, FooterLabel {{
+        background: {_COLORS["background"]};
+        color: {_COLORS["muted"]};
+    }}
+    FooterKey .footer-key--key {{
+        color: {_COLORS["blue"]};
+        background: {_COLORS["background"]};
+    }}
+    FooterKey .footer-key--description {{
+        color: {_COLORS["muted"]};
+        background: {_COLORS["background"]};
+    }}
+    """
     BINDINGS: ClassVar = [
         Binding("b", "show('builders')", "Builders"),
         Binding("r", "show('releases')", "Releases"),
@@ -141,17 +409,31 @@ class MatrixTui(App):
         self._busy = False
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static(id="status")
-        yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
-        yield Static(id="extra")
-        yield Footer()
+        with Vertical(id="dashboard"):
+            with Horizontal(id="top"):
+                with Vertical(id="peers-panel"):
+                    yield Static(id="peers-title", classes="panel-title")
+                    yield DataTable(id="peers", cursor_type="none")
+                with Vertical(id="requests-panel"):
+                    yield Static(id="requests-title", classes="panel-title")
+                    yield DataTable(id="table", cursor_type="row")
+            yield Static(id="divider")
+            with Vertical(id="details-panel"):
+                yield Static(id="details-title", classes="panel-title")
+                yield Static(id="details")
+                yield Static(id="extra")
+        yield Footer(show_command_palette=False, compact=True)
 
     async def on_mount(self) -> None:
+        node = self.g.node(self.node_id)
+        self.query_one(
+            "#dashboard", Vertical
+        ).border_title = f"MATRIX · {node.operator} · {self.node_id}"
         if self.peers is None:
             self.peers = PeerClient(self.g, CLIENT)
         self.set_interval(1.0, self.poll)
         await self.poll()
+        self.query_one("#table", DataTable).focus()
 
     async def on_unmount(self) -> None:
         if self.peers is not None:
@@ -178,6 +460,7 @@ class MatrixTui(App):
     def action_show(self, view: str) -> None:
         self.view, self.extra, self.show_log = view, "", False
         self.render_view(reset=True)
+        self.query_one("#peers" if view == "builders" else "#table", DataTable).focus()
 
     async def action_toggle_log(self) -> None:
         if self.view != "detail" or self.detail_id is None or self.peers is None:
@@ -189,10 +472,12 @@ class MatrixTui(App):
         self.render_view()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "table":
+            return
         key = event.row_key.value
-        if self.view == "releases" and key:
+        if self.view in ("builders", "releases", "detail") and key:
             self.view, self.detail_id, self.show_log, self.extra = "detail", key, False, ""
-            self.render_view(reset=True)
+            self.render_view()
         elif self.view == "evidence" and key is not None:
             item = self.evidence[int(key)] if int(key) < len(self.evidence) else None
             if item is not None:
@@ -200,77 +485,137 @@ class MatrixTui(App):
                 self.extra = f"proof ({ok}):\n" + json.dumps(item.get("proof"), indent=2)
                 self.render_view()
 
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "table" and self.view != "evidence" and event.row_key:
+            self.detail_id = event.row_key.value
+            self._update_detail()
+
+    def on_resize(self) -> None:
+        if self.query("#divider"):
+            self._render_divider()
+
     # rendering
 
     def render_view(self, reset: bool = False) -> None:
+        peers = self.query_one("#peers", DataTable)
         table = self.query_one("#table", DataTable)
         row = 0 if reset else table.cursor_row
+        peers.clear(columns=True)
         table.clear(columns=True)
-        status = getattr(self, f"_render_{self.view}")(table)
-        reachable = sum(1 for h in self.health.values() if h is not None)
-        self.query_one("#status", Static).update(
-            f"[b]{self.view.upper()}[/b]  node {self.node_id}  "
-            f"builders up {reachable}/{len(self.g.nodes)}  {status}"
-        )
-        self.query_one("#extra", Static).update(Text(self.extra))
+        self._render_builders(peers)
+        if self.view == "evidence":
+            self.query_one("#requests-title", Static).update("EVIDENCE")
+            self._render_evidence(table)
+        else:
+            self.query_one("#requests-title", Static).update("REQUESTS")
+            self._render_releases(table)
+        self.query_one("#peers-title", Static).update(f"PEERS ({len(self.g.nodes)})")
         if table.row_count:
             table.move_cursor(row=min(row, table.row_count - 1))
+        self._update_detail()
+        self._render_divider()
 
-    def _render_builders(self, t: DataTable) -> str:
-        t.add_columns("operator", "builder", "address", "reachable", "genesis", "clock")
+    def _render_divider(self) -> None:
+        width = self.query_one("#divider", Static).size.width
+        split = self.query_one("#peers-panel", Vertical).size.width
+        self.query_one("#divider", Static).update(_divider(width, split))
+
+    def _render_builders(self, t: DataTable) -> None:
+        t.add_columns("node", "operator", "status", "genesis")
         for n in sorted(self.g.nodes, key=lambda n: n.operator):
             h = self.health.get(n.id)
             match = (
                 h is not None and h.get("genesis_hash") == self.g.hash and h.get("node_id") == n.id
             )
             t.add_row(
-                n.operator,
                 n.id,
-                n.addr,
-                Text("yes", "green") if h else Text("no", "red"),
-                Text("match", "green") if match else Text("-" if h is None else "MISMATCH", "red"),
-                _time(h.get("now")) if h else "-",
+                n.operator,
+                _styled("● UP" if h else "○ DOWN", "green" if h else "red"),
+                _styled(
+                    "✓" if match else "?" if h is None else "!", "green" if match else "yellow"
+                ),
+                key=n.id,
             )
-        return f"genesis {self.g.hash[:16]}"
 
-    def _render_releases(self, t: DataTable) -> str:
-        t.add_columns("id", "release", "phase", "attested", "quorum", "verdict")
+    def _render_releases(self, t: DataTable) -> None:
+        t.add_columns("request", "attested", "quorum", "verdict")
         for r in self.releases:
             att, top = r.counts()
             name = f"{r.body['repo_url'].rsplit('/', 1)[-1]}@{r.body['tag']}" if r.body else "?"
+            request = Text.assemble(
+                (r.id[:8], _COLORS["muted"]),
+                (f"  {name}", _COLORS["text"]),
+                (f"\n{r.phase}", _COLORS["muted"]),
+            )
             t.add_row(
-                r.id[:12],
-                name,
-                r.phase,
-                f"{att}/{self.g.replicas}",
-                f"{min(top, self.g.threshold)}/{self.g.threshold}",
+                request,
+                _styled(f"{att}/{self.g.replicas}", "yellow" if att < self.g.replicas else "green"),
+                _styled(
+                    f"{min(top, self.g.threshold)}/{self.g.threshold}",
+                    "green" if top >= self.g.threshold else "yellow",
+                ),
                 _verdict_text(r.verdict),
+                height=2,
                 key=r.id,
             )
-        return "Enter: detail"
 
-    def _render_detail(self, t: DataTable) -> str:
-        t.add_columns("builder", "operator", "result", "matches quorum")
+    def _update_detail(self) -> None:
         r = next((r for r in self.releases if r.id == self.detail_id), None)
         if r is None:
-            return f"release {self.detail_id or '?'} not on this node"
-        style = {"ok": "green", "": ""}
-        for nid, op, res, mark in builder_rows(self.g, r.id, r.verdict):
-            t.add_row(nid, op, res, Text(mark or "-", style.get(mark, "red")))
-        name = f"{r.body['repo_url']}@{r.body['tag']}" if r.body else "?"
-        return f"{name}  " + _verdict_text(r.verdict).plain + "  l: log tail"
+            r = self.releases[0] if self.releases else None
+            self.detail_id = r.id if r else None
+        self.query_one("#details-title", Static).update(
+            f"REQUEST DETAILS · {r.id[:8]}" if r else "REQUEST DETAILS"
+        )
+        self.query_one("#details", Static).update(
+            self._render_detail(r) if r else _styled("No requests on this node", "muted")
+        )
+        self.query_one("#extra", Static).update(Text(self.extra))
+
+    def _render_detail(self, r: Release) -> Text:
+        lines = Text()
+        matched = 0
+        for nid, _, res, mark in builder_rows(self.g, r.id, r.verdict):
+            if mark == "ok":
+                label, colour = "MATCH", "green"
+                matched += 1
+            elif mark == "DISAGREE":
+                label, colour = "DISAGREES", "red"
+            elif mark == "EQUIVOCATION":
+                label, colour = "EQUIVOCATION", "red"
+            elif res == "-":
+                label, colour = "NO ATTESTATION", "yellow"
+            else:
+                label, colour = "PENDING", "yellow"
+            state = "--" if res == "-" else "FAILED" if res == "FAILED" else "ATTESTED"
+            result = "--" if res == "-" else res[:12] + ("…" if len(res) > 12 else "")
+            lines.append_text(_styled(f"{nid:<12} {state:<10} {result:<16} {label}\n", colour))
+        state = _verdict_text(r.verdict)
+        verdict = Text.assemble(
+            ("VERDICT: ", _COLORS["blue"]),
+            (state.plain, state.style),
+            (
+                f" · {matched}/{self.g.replicas} MATCHED · THRESHOLD: {self.g.threshold}",
+                _COLORS["muted"],
+            ),
+        )
+        lines.append_text(verdict)
+        return lines
 
     def _render_evidence(self, t: DataTable) -> str:
         t.add_columns("kind", "signer", "release", "time", "proof")
         names = {r.id: f"{r.body['tag']} ({r.id[:8]})" for r in self.releases if r.body}
         for i, e in enumerate(self.evidence):
             ok = check_proof(e, self.g)
-            proof = Text("valid", "green") if ok else Text("unverified", "yellow")
+            proof = Text(
+                "valid" if ok else "unverified",
+                _COLORS["green"] if ok else _COLORS["yellow"],
+            )
             t.add_row(
-                Text(e["kind"], "red"),
+                Text(e["kind"], _COLORS["red"]),
                 e["signer"],
                 names.get(e["request_id"], e["request_id"][:12]),
-                _time(e.get("created_at")),
+                Text(_time(e.get("created_at")), _COLORS["muted"]),
                 proof,
                 key=str(i),
             )
@@ -278,6 +623,11 @@ class MatrixTui(App):
 
 
 def run_tui(g: Genesis, node_id: str) -> int:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            curses.wrapper(_intro)  # wrapper restores terminal modes before Textual starts.
+        except (curses.error, OSError):
+            pass  # A terminal without curses support can still run the dashboard.
     MatrixTui(g, node_id).run()
     return 0
 

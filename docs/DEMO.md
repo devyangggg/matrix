@@ -80,6 +80,10 @@ Open the TUI in a second terminal and leave it running for the whole demo:
 docker compose run --rm cli tui            # keys: b builders, r releases, Enter detail, l log, e evidence, q quit
 ```
 
+The once-only, roughly two-second intro reveals blue MATRIX lettering with a mint shimmer,
+then hands control to the live dashboard. Any key skips it; `q` closes the dashboard, not
+just the intro.
+
 Builders screen: 8 rows, all `reachable yes`, `genesis match`.
 
 ## 2. Scene 1: happy path (`v1.2.0`)
