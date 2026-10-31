@@ -1,4 +1,5 @@
-"""Real eight-process Docker-backed RFC §9.1 fault matrix."""
+"""Real Docker-backed RFC §9.1 fault matrix: 8 builders with f = 2 (compose dev profile) and the
+rev 5 demo shape, 4 builders with f = 1 (one per laptop)."""
 
 import asyncio
 import os
@@ -14,6 +15,15 @@ pytestmark = pytest.mark.integration
 TAG = os.environ.get("MATRIX_TEST_TAG", "")
 COMMIT = os.environ.get("MATRIX_TEST_COMMIT", "")
 PATCH = ROOT / "examples" / "faults" / "backdoor.patch"
+MODES = ["inject", "lie", "collude", "stall", "equivocate", "bad-artifact"]
+SETTINGS = {
+    "inject": ["--fault", "inject", "--patch", str(PATCH)],
+    "lie": ["--fault", "lie"],
+    "collude": ["--fault", "collude", "--hash", "f" * 64],
+    "stall": ["--fault", "stall"],
+    "equivocate": ["--fault", "equivocate"],
+    "bad-artifact": ["--fault", "bad-artifact"],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -55,11 +65,18 @@ async def collect(network, rid, request, genesis, *, deadline=170):
     return last
 
 
+def first_of_each_operator(network) -> list[str]:
+    first: dict[str, str] = {}
+    for node in network.genesis["nodes"]:
+        first.setdefault(node["operator"], node["id"])
+    return list(first.values())
+
+
 async def release(network):
     rid, request, genesis = signed_request(network)
-    # Three independent operators receive the request even if an operator is malicious.
+    # Independent operators receive the request even if an operator is malicious.
     accepted = []
-    for node_id in ("builder1", "builder3", "builder5", "builder7"):
+    for node_id in first_of_each_operator(network):
         if node_id not in network.processes:
             continue
         try:
@@ -82,59 +99,62 @@ async def wait_attest(network, rid, signer, deadline=120):
     pytest.fail(f"{signer} did not attest")
 
 
+async def assert_fault_contained(network, mode, placement):
+    """The honest hash certifies, and each fault mode leaves the trace it should."""
+    rid, request, genesis = await release(network)
+    result = await collect(network, rid, request, genesis)
+    assert result.state == "AGREED"
+    assert result.hash != "f" * 64
+    if mode in ("inject", "lie", "collude"):
+        for signer in placement:
+            assert await wait_attest(network, rid, signer) != result.hash
+    if mode == "bad-artifact":
+        # A quorum can form before this builder has finished; wait for its artifact.
+        node = placement[0]
+        end = time.monotonic() + 60
+        while time.monotonic() < end:
+            async with network.session.get(
+                f"http://{network.address(node)}/v1/artifacts/{result.hash}"
+            ) as response:
+                if response.status == 200:
+                    assert sha256(await response.read()).hexdigest() != result.hash
+                    break
+            await asyncio.sleep(1)
+        else:
+            pytest.fail("faulty builder did not serve its built artifact")
+    if mode == "equivocate":
+        observer = network.genesis["nodes"][-1]["id"]  # an honest builder (never in placement)
+        end = time.monotonic() + 15
+        proof = False
+        while time.monotonic() < end:
+            async with network.session.get(
+                f"http://{network.address(observer)}/v1/evidence"
+            ) as response:
+                items = (await response.json())["evidence"]
+                proof = any(item["kind"] == "EQUIVOCATION" and item["proof"] for item in items)
+            if proof:
+                break
+            await asyncio.sleep(1)
+        assert proof
+
+
+def _need_patch(mode):
+    if mode == "inject" and not PATCH.is_file():
+        pytest.skip("examples/faults/backdoor.patch is not available")
+
+
+# --- 8 builders, f = 2 (compose dev profile) -------------------------------------------------
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "mode", ["inject", "lie", "collude", "stall", "equivocate", "bad-artifact"]
-)
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize(
     "placement", [("builder1",), ("builder1", "builder2"), ("builder1", "builder3")]
 )
 async def test_faulty_builders_cannot_certify_fake_hash(tmp_path, mode, placement):
-    if mode == "inject" and not PATCH.is_file():
-        pytest.skip("Track B sample backdoor.patch is not available")
-    settings = {
-        "inject": ["--fault", "inject", "--patch", str(PATCH)],
-        "lie": ["--fault", "lie"],
-        "collude": ["--fault", "collude", "--hash", "f" * 64],
-        "stall": ["--fault", "stall"],
-        "equivocate": ["--fault", "equivocate"],
-        "bad-artifact": ["--fault", "bad-artifact"],
-    }
-    async with Network(tmp_path, {node: settings[mode] for node in placement}) as network:
-        rid, request, genesis = await release(network)
-        result = await collect(network, rid, request, genesis)
-        assert result.state == "AGREED"
-        assert result.hash != "f" * 64
-        if mode in ("inject", "lie", "collude"):
-            for signer in placement:
-                assert await wait_attest(network, rid, signer) != result.hash
-        if mode == "bad-artifact":
-            # A quorum can form before this builder has finished; wait for its artifact.
-            node = placement[0]
-            end = time.monotonic() + 60
-            while time.monotonic() < end:
-                async with network.session.get(
-                    f"http://{network.address(node)}/v1/artifacts/{result.hash}"
-                ) as response:
-                    if response.status == 200:
-                        assert sha256(await response.read()).hexdigest() != result.hash
-                        break
-                await asyncio.sleep(1)
-            else:
-                pytest.fail("faulty builder did not serve its built artifact")
-        if mode == "equivocate":
-            end = time.monotonic() + 15
-            proof = False
-            while time.monotonic() < end:
-                async with network.session.get(
-                    f"http://{network.address('builder8')}/v1/evidence"
-                ) as response:
-                    items = (await response.json())["evidence"]
-                    proof = any(item["kind"] == "EQUIVOCATION" and item["proof"] for item in items)
-                if proof:
-                    break
-                await asyncio.sleep(1)
-            assert proof
+    _need_patch(mode)
+    async with Network(tmp_path, {node: SETTINGS[mode] for node in placement}) as network:
+        await assert_fault_contained(network, mode, placement)
 
 
 @pytest.mark.asyncio
@@ -179,3 +199,31 @@ async def test_two_stalling_malicious_plus_crashed_honest(tmp_path, crashed, exp
             deadline=165 if expected == "PENDING" else 170,
         )
         assert result.state == expected
+
+
+# --- 4 builders, one per laptop, f = 1 (RFC rev 5 demo) --------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", MODES)
+async def test_four_builders_one_faulty_cannot_certify_fake_hash(tmp_path, mode):
+    _need_patch(mode)
+    async with Network(tmp_path, {"builder1": SETTINGS[mode]}, nodes=4) as network:
+        await assert_fault_contained(network, mode, ("builder1",))
+
+
+@pytest.mark.asyncio
+async def test_four_builders_one_faulty_plus_one_offline_still_certifies(tmp_path):
+    # liveness s = 1: the two remaining honest builders are exactly T = 2
+    async with Network(
+        tmp_path, {"builder1": ["--fault", "stall"]}, offline={"builder4"}, nodes=4
+    ) as network:
+        rid, request, genesis = await release(network)
+        assert (await collect(network, rid, request, genesis)).state == "AGREED"
+
+
+@pytest.mark.asyncio
+async def test_four_builders_three_offline_stays_pending(tmp_path):
+    async with Network(tmp_path, offline={"builder2", "builder3", "builder4"}, nodes=4) as network:
+        rid, request, genesis = await release(network)
+        assert (await collect(network, rid, request, genesis, deadline=120)).state == "PENDING"

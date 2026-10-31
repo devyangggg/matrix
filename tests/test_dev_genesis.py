@@ -29,7 +29,9 @@ TOP_LEVEL = {
 }
 
 
-def run_generator(out: Path, addrs: str, profile: str) -> subprocess.CompletedProcess[str]:
+def run_generator(
+    out: Path, addrs: str, profile: str, *extra: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,
@@ -46,6 +48,7 @@ def run_generator(out: Path, addrs: str, profile: str) -> subprocess.CompletedPr
             REPOS[1],
             "--image",
             IMAGE,
+            *extra,
         ],
         capture_output=True,
         text=True,
@@ -161,3 +164,23 @@ def test_invalid_genesis_inputs_are_rejected_before_keys(tmp_path, flag, value):
     result = subprocess.run(args, check=False, capture_output=True, text=True)
     assert result.returncode != 0
     assert not (out / "keys").exists()
+
+
+@pytest.mark.parametrize("addrs", ["compose", "local"])
+def test_four_node_profile_one_builder_per_laptop(tmp_path, addrs):
+    from matrix.genesis import load_genesis
+
+    out = tmp_path / "dev4"
+    run_generator(out, addrs, "demo", "--nodes", "4")
+    raw = json.loads((out / "genesis.json").read_bytes())
+    assert (raw["f"], raw["replicas"], raw["threshold"]) == (1, 4, 2)
+    assert [n["id"] for n in raw["nodes"]] == [f"builder{i}" for i in range(1, 5)]
+    assert [n["operator"] for n in raw["nodes"]] == [f"laptop{x}" for x in "ABCD"]
+    assert [n["addr"] for n in raw["nodes"]] == [
+        f"builder{i}:7700" if addrs == "compose" else f"127.0.0.1:{7699 + i}" for i in range(1, 5)
+    ]
+    assert sorted(p.name for p in (out / "keys").iterdir()) == [
+        "builder1.key", "builder2.key", "builder3.key", "builder4.key", "release.key",
+    ]  # fmt: skip
+    g = load_genesis(str(out / "genesis.json"))  # passes every genesis rule
+    assert (out / "genesis.sha256").read_text().strip() == g.hash
