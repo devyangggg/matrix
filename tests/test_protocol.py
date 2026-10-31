@@ -26,17 +26,23 @@ async def until(cond, n=500):
 
 class Rig:
     def __init__(self, g, keys, clock, monkeypatch, me, outcomes, fault, gate):
-        self.g, self.keys, self.clock, self.me = g, keys, clock, me
+        self.g, self.keys, self.clock, self.me, self.mp = g, keys, clock, me, monkeypatch
         self.log: list = []
         self.store = FakeStore(self.log)
+        self.fault = fault or FakeFault()
+        self.env = BuildEnv("/tmp/mx", me, 1000, 1000)
+        self.tasks: list[asyncio.Task] = []
+        self.start_engine(outcomes, gate)
+
+    def start_engine(self, outcomes=None, gate=None):
+        """(Re)create the Engine over the same store: a process restart."""
         self.peers = FakePeers(log=self.log)
         self.builder = FakeBuilder(outcomes or [HASH_OK], gate)
-        monkeypatch.setattr(builder_mod, "build", self.builder)
-        self.fault = fault or FakeFault()
-        env = BuildEnv("/tmp/mx", me, 1000, 1000)
-        sk = keys[me]
-        self.engine = Engine(g, g.node(me), sk, self.store, self.peers, env, self.fault, clock)
-        self.tasks: list[asyncio.Task] = []
+        self.mp.setattr(builder_mod, "build", self.builder)
+        g, me = self.g, self.me
+        self.engine = Engine(
+            g, g.node(me), self.keys[me], self.store, self.peers, self.env, self.fault, self.clock
+        )
 
     def release(self, tag="v1.2.0", signer="ci-release", repo=REPO) -> dict:
         body = {"v": 1, "repo_url": repo, "commit": "1" * 40, "tag": tag}
@@ -385,3 +391,240 @@ async def test_equivocation_is_recorded_as_evidence(make_rig):
     (ev,) = rig.store.list_evidence(0)
     assert (ev["kind"], ev["signer"], ev["request_id"]) == ("EQUIVOCATION", "builder3", rid)
     assert ev["proof"].count('"sig"') == 2  # two signed, conflicting envelopes
+
+
+# --- recover -------------------------------------------------------------------------------
+
+
+async def test_restart_resends_stored_attestation_without_rebuilding(make_rig):
+    rig = make_rig()
+    rig.start_worker()
+    rid = await rig.submit()
+    await until(lambda: rig.phase(rid) == "ATTESTED")
+    stored = rig.store.attestations(rid)
+
+    rig.start_engine()  # restart
+    await rig.engine.recover()
+    assert [e for e, only in rig.peers.attests_sent] == stored
+    assert rig.engine.queue.empty()
+    rig.start_worker()
+    await asyncio.sleep(0)
+    assert rig.builder.calls == []  # never rebuilds an attested request
+
+
+async def test_restart_requeues_unattested_requests_and_sheds_overflow(make_rig):
+    rig = make_rig(gate=asyncio.Event())  # builds hang: simulates a crash mid-build
+    rig.start_worker()
+    r1 = await rig.submit("v1")
+    await rig.builder.started.wait()
+    assert rig.phase(r1) == "BUILDING"
+    r2 = await rig.submit("v2")
+    for t in rig.tasks:
+        t.cancel()
+
+    rig.start_engine()
+    await rig.engine.recover()
+    assert rig.phase(r1) == "RECEIVED" and rig.engine.queue.get_nowait() == r1
+    assert rig.phase(r2) == "SHED"  # one queue slot; the other request is shed
+
+
+async def test_recover_leaves_other_requests_alone(make_rig, clock):
+    rig = make_rig(outcomes=[Outcome("BAD_REF", None, None, "x")])
+    rig.start_worker()
+    missed = await rig.submit("v1")
+    await until(lambda: rig.phase(missed) == "MISSED")
+    old = await rig.submit("v2")
+    await until(lambda: rig.phase(old) == "MISSED")
+    clock.advance(rig.g.request_ttl_s + 1)  # both are past their TTL
+    fresh = await rig.submit("v3")
+    rig.store.set_phase(fresh, "OBSERVING")
+
+    rig.start_engine()
+    await rig.engine.recover()
+    assert rig.engine.queue.empty()
+    assert [rig.phase(r) for r in (missed, old, fresh)] == ["MISSED", "MISSED", "OBSERVING"]
+
+
+# --- evidence ------------------------------------------------------------------------------
+
+
+async def agreed_rig(make_rig, votes):
+    rig = make_rig()
+    rid = await rig.submit()
+    for who, result in votes:
+        await rig.engine.on_attest(rig.attest(who, result, rid), None)
+    return rig, rid
+
+
+def kinds(rig):
+    return sorted((e["kind"], e["signer"]) for e in rig.store.list_evidence(0))
+
+
+async def test_disagree_is_recorded_only_against_a_quorum_result(make_rig):
+    votes = [("builder2", H1), ("builder3", H1), ("builder4", H2)]
+    rig, rid = await agreed_rig(make_rig, votes)
+    assert kinds(rig) == []  # no quorum yet: a dissenter is not provable
+    await rig.engine.on_attest(rig.attest("builder5", H1, rid), None)
+    assert kinds(rig) == [("DISAGREE", "builder4")]
+    (ev,) = rig.store.list_evidence(0)
+    assert ev["proof"].count('"sig"') == 1
+
+
+async def test_disagree_against_a_failed_quorum(make_rig):
+    votes = [
+        ("builder2", "FAILED"),
+        ("builder3", "FAILED"),
+        ("builder4", "FAILED"),
+        ("builder5", H1),
+    ]
+    rig, _ = await agreed_rig(make_rig, votes)
+    assert kinds(rig) == [("DISAGREE", "builder5")]
+
+
+async def test_equivocator_gets_equivocation_but_not_disagree(make_rig):
+    votes = [
+        ("builder2", H1),
+        ("builder3", H1),
+        ("builder4", H1),
+        ("builder5", H1),
+        ("builder5", H2),
+    ]
+    rig, _ = await agreed_rig(make_rig, votes)
+    assert kinds(rig) == [("EQUIVOCATION", "builder5")]
+
+
+async def test_stall_after_twice_the_build_timeout_and_only_once(make_rig, clock):
+    rig, rid = await agreed_rig(make_rig, [("builder2", H1), ("builder3", H1)])
+    rig.engine.detect_evidence(rid)
+    assert kinds(rig) == []
+    clock.advance(2 * rig.g.build_timeout_s + 1)
+    rig.engine.detect_evidence(rid)
+    rig.engine.detect_evidence(rid)
+    stalled = {f"builder{i}" for i in (1, 4, 5, 6, 7, 8)}
+    assert kinds(rig) == sorted(("STALL", s) for s in stalled)
+    assert all(e["proof"] is None for e in rig.store.list_evidence(0))
+
+
+async def test_is_settled(make_rig, clock):
+    rig, rid = await agreed_rig(make_rig, [("builder2", H1), ("builder3", H1)])
+    assert not rig.engine.is_settled(rid)
+    await rig.engine.on_attest(rig.attest("builder4", H1, rid), None)
+    assert rig.engine.is_settled(rid)  # AGREED
+    rig2, rid2 = await agreed_rig(make_rig, [])
+    assert not rig2.engine.is_settled(rid2)
+    clock.advance(rig2.g.request_ttl_s + 1)
+    assert rig2.engine.is_settled(rid2) and rig2.engine.is_settled("9" * 64)
+
+
+# --- sync ----------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fast_sleep(monkeypatch):
+    real = asyncio.sleep
+
+    async def sleep(_):
+        await real(0)
+
+    monkeypatch.setattr("matrix.protocol.asyncio.sleep", sleep)
+    monkeypatch.setattr(builder_mod, "expire_artifacts", lambda env, now: None)
+
+
+def listing(now, *items):
+    return {
+        "now": now,
+        "requests": [{"id": r, "phase": "RECEIVED", "received_at": t} for r, t in items],
+    }
+
+
+def start_sync(rig):
+    rig.tasks.append(asyncio.create_task(rig.engine.sync_loop()))
+
+
+async def test_sync_pulls_unknown_requests_and_their_attestations(make_rig, fast_sleep):
+    rig = make_rig()
+    release = rig.release()
+    rid = request_id(release["body"])
+    atts = [rig.attest(f"builder{i}", H1, rid) for i in (2, 3, 4)]
+    rig.peers.responses = {
+        "builder2": {
+            "/v1/requests?since=0.0": listing(1000.0, (rid, 990.0)),
+            f"/v1/requests/{rid}": {"request": release, "phase": "RECEIVED", "received_at": 990.0},
+            f"/v1/requests/{rid}/bundle": {"request": release, "envelopes": [*atts, {"junk": 1}]},
+        }
+    }
+    start_sync(rig)
+    await until(lambda: rig.store.attestation_count(rid, "builder4") == 1)
+    assert rig.phase(rid) == "RECEIVED" and rig.engine.is_settled(rid)
+    assert [rig.store.attestation_count(rid, f"builder{i}") for i in (2, 3, 4)] == [1, 1, 1]
+
+
+async def test_sync_cursor_comes_from_the_peers_clock_with_60s_overlap(make_rig, fast_sleep):
+    rig = make_rig()
+    rig.peers.responses = {"builder2": {"/v1/requests?since=0.0": listing(5000.0)}}
+    start_sync(rig)
+    await until(lambda: ("builder2", "/v1/requests?since=4940.0") in rig.peers.gets)
+    assert rig.engine.cursors["builder2"] == 5000.0
+
+
+async def test_sync_skips_requests_past_ttl_on_the_peers_clock(make_rig, fast_sleep):
+    rig = make_rig()
+    release = rig.release()
+    rid = request_id(release["body"])
+    now = 10_000.0
+    rig.peers.responses = {
+        "builder2": {
+            "/v1/requests?since=0.0": listing(now, (rid, now - rig.g.request_ttl_s - 1)),
+            f"/v1/requests/{rid}": {"request": release, "phase": "RECEIVED", "received_at": 0.0},
+        }
+    }
+    start_sync(rig)
+    await until(lambda: ("builder2", "/v1/requests?since=9940.0") in rig.peers.gets)
+    assert rig.store.get_request(rid) is None
+    assert ("builder2", f"/v1/requests/{rid}") not in rig.peers.gets
+
+
+async def test_sync_survives_failing_and_hostile_peers(make_rig, fast_sleep):
+    rig = make_rig()
+    release = rig.release()
+    rid = request_id(release["body"])
+    rig.peers.responses = {
+        "builder2": {"/v1/requests?since=0.0": RuntimeError("boom")},
+        "builder3": {"/v1/requests?since=0.0": "not a dict"},
+        "builder4": {"/v1/requests?since=0.0": {"now": float("nan"), "requests": []}},
+        "builder5": {"/v1/requests?since=0.0": {"now": 1.0, "requests": ["x", {"id": 5}, None]}},
+        "builder6": {
+            "/v1/requests?since=0.0": listing(1000.0, (rid, 999.0)),
+            f"/v1/requests/{rid}": {"request": release},
+        },
+    }
+    start_sync(rig)
+    await until(lambda: rig.store.get_request(rid) is not None)  # the good peer still got through
+    assert "builder4" not in rig.engine.cursors and "builder3" not in rig.engine.cursors
+
+
+async def test_sync_pulls_bundles_only_for_live_requests(make_rig, fast_sleep, clock):
+    rig = make_rig()
+    old = await rig.submit("v1")
+    clock.advance(rig.g.request_ttl_s + 1)
+    live = await rig.submit("v2")
+    start_sync(rig)
+    await until(lambda: ("builder2", f"/v1/requests/{live}/bundle") in rig.peers.gets)
+    assert ("builder2", f"/v1/requests/{old}/bundle") not in rig.peers.gets
+
+
+async def test_sync_flags_stalled_builders_and_expires_artifacts_hourly(
+    make_rig, fast_sleep, clock, monkeypatch
+):
+    expired = []
+    monkeypatch.setattr(builder_mod, "expire_artifacts", lambda env, now: expired.append(now))
+    rig = make_rig()
+    rid = await rig.submit()
+    start_sync(rig)
+    await until(lambda: expired)
+    clock.advance(2 * rig.g.build_timeout_s + 1)
+    await until(lambda: ("STALL", "builder2") in kinds(rig))
+    assert len(expired) == 1  # not again within the hour
+    clock.advance(3600)
+    await until(lambda: len(expired) == 2)
+    assert rig.store.get_request(rid) is not None

@@ -1,6 +1,8 @@
 import asyncio
 import collections
 import logging
+import math
+import re
 import secrets
 import time
 from typing import TYPE_CHECKING, Any
@@ -29,6 +31,11 @@ INGEST_PER_MIN = 20
 MAX_ATTEMPTS = 3  # first try + 2 retries (RFC §7.6 rule 3)
 
 log = logging.getLogger("matrix")
+_HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
+
+
+def _num(x: Any) -> bool:
+    return type(x) in (int, float) and math.isfinite(x)
 
 
 class Engine:
@@ -280,7 +287,71 @@ class Engine:
     # --- sync and recovery (A6) -------------------------------------------------------------
 
     async def sync_loop(self) -> None:
-        raise NotImplementedError
+        while True:
+            await self._sync_round()
+            await asyncio.sleep(self.g.sync_interval_s)
+
+    async def _sync_round(self) -> None:
+        await asyncio.gather(*(self._sync_peer(p) for p in self._peer_ids()))
+        now = self.clock()
+        for row in self.store.live_requests(now, self.g.request_ttl_s):
+            self.detect_evidence(row["id"])  # catches STALL, which no incoming message triggers
+        if now - self._last_expire >= 3600:
+            builder.expire_artifacts(self.env, now)
+            self._last_expire = now
+
+    async def _sync_peer(self, peer: str) -> None:
+        try:
+            await self._pull_requests(peer)
+            await self._pull_bundles(peer)
+        except Exception:
+            log.warning("%s sync.peer_error peer=%s", self.me.id, peer, exc_info=True)
+
+    async def _pull_requests(self, peer: str) -> None:
+        since = max(
+            0.0, self.cursors.get(peer, 0.0) - 60
+        )  # overlap: the peer's clock is the cursor
+        d = await self.peers.get_json(peer, f"/v1/requests?since={since}")
+        if (
+            not isinstance(d, dict)
+            or not _num(d.get("now"))
+            or not isinstance(d.get("requests"), list)
+        ):
+            return
+        self.cursors[peer] = d["now"]
+        for item in d["requests"]:
+            if not isinstance(item, dict):
+                continue
+            rid, received = item.get("id"), item.get("received_at")
+            if not isinstance(rid, str) or not _HEX64.fullmatch(rid) or not _num(received):
+                continue
+            if (
+                self.store.get_request(rid) is not None
+                or d["now"] - received > self.g.request_ttl_s
+            ):
+                continue
+            detail = await self.peers.get_json(peer, f"/v1/requests/{rid}")
+            if isinstance(detail, dict):
+                await self.on_request(detail.get("request"))  # re-validates; honours the ingest cap
+
+    async def _pull_bundles(self, peer: str) -> None:
+        for row in self.store.live_requests(self.clock(), self.g.request_ttl_s):
+            d = await self.peers.get_json(peer, f"/v1/requests/{row['id']}/bundle")
+            envs = d.get("envelopes") if isinstance(d, dict) else None
+            if isinstance(envs, list):
+                # at most 2 attestations per signer can ever be stored
+                for env in envs[: 2 * len(self.g.nodes)]:
+                    await self.on_attest(env, peer)
 
     async def recover(self) -> None:
-        raise NotImplementedError
+        for row in self.store.live_requests(self.clock(), self.g.request_ttl_s):
+            rid = row["id"]
+            b = self.store.get_build(rid)
+            if b is not None and b["result"] is not None:
+                # attested before the restart: re-send, never rebuild or re-sign
+                for env in self.store.attestations(rid):
+                    if env["signer"] == self.me.id:
+                        await self.peers.broadcast_attest(env)
+            elif row["phase"] in ("RECEIVED", "BUILDING") and self.me.id in self._selected(rid):
+                self.store.set_phase(rid, "RECEIVED")
+                self._enqueue(rid)

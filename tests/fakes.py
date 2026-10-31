@@ -131,6 +131,7 @@ class FakePeers:
         self.log = log if log is not None else []
         self.requests_sent: list[dict] = []
         self.attests_sent: list[tuple[dict, list[str] | None]] = []
+        self.gets: list[tuple[str, str]] = []  # (node, path) of every get_json / get_bytes
 
     async def broadcast_request(self, env: dict) -> None:
         self.log.append(("peers", "broadcast_request"))
@@ -140,11 +141,18 @@ class FakePeers:
         self.log.append(("peers", "broadcast_attest"))
         self.attests_sent.append((env, only))
 
+    def _get(self, node_id: str, path: str):
+        self.gets.append((node_id, path))
+        out = self.responses.get(node_id, {}).get(path)
+        if isinstance(out, BaseException):  # a canned failure for this peer/path
+            raise out
+        return out
+
     async def get_json(self, node_id: str, path: str):
-        return self.responses.get(node_id, {}).get(path)
+        return self._get(node_id, path)
 
     async def get_bytes(self, node_id: str, path: str, limit: int):
-        return self.responses.get(node_id, {}).get(path)
+        return self._get(node_id, path)
 
     async def close(self) -> None:
         pass
