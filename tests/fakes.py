@@ -4,7 +4,10 @@ Fakes mirror the real signatures; rows are plain dicts (real Store returns sqlit
 supports the same ``row["col"]`` access).
 """
 
+import asyncio
 import json
+import secrets
+from dataclasses import dataclass
 
 from matrix.builder import Outcome
 from matrix.faults import Fault
@@ -81,7 +84,10 @@ class FakeStore:
         return self.builds.get(rid)
 
     def upsert_build(self, rid: str, **fields) -> None:
-        self.builds.setdefault(rid, {"request_id": rid}).update(fields)
+        cols = dict.fromkeys(
+            ("result", "artifact_path", "error", "log_path", "started_at", "finished_at")
+        )  # like a real row: every column exists, NULL until set
+        self.builds.setdefault(rid, {"request_id": rid, **cols}).update(fields)
 
     def record_own_attestation(self, rid: str, result: str, artifact_path, env, now: float) -> None:
         self.log.append(("store", "record_own_attestation"))
@@ -172,15 +178,44 @@ class FakeEngine:
 
 
 class FakeBuilder:
-    """Stands in for ``matrix.builder.build``; returns outcomes in order, repeating the last."""
+    """Stands in for ``matrix.builder.build``.
 
-    def __init__(self, outcomes: list[Outcome]):
+    Returns outcomes in order, repeating the last; an exception instance is raised instead.
+    If ``gate`` is set the build blocks until it is set; ``started`` is set when a build begins.
+    """
+
+    def __init__(self, outcomes: list, gate: asyncio.Event | None = None):
         self.outcomes = list(outcomes)
+        self.gate = gate
+        self.started = asyncio.Event()
         self.calls: list[tuple] = []
 
     async def __call__(self, req, rid, g, env, attempt, patch=None) -> Outcome:
         self.calls.append((rid, attempt, patch))
-        return self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        self.started.set()
+        if self.gate is not None:
+            await self.gate.wait()
+        out = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+
+@dataclass
+class FakeFault(Fault):
+    """Mirrors LLD §3.11 so Engine tests do not depend on Track C's faults.py landing."""
+
+    new_requests: int = 0  # how many times on_new_request ran
+
+    def on_new_request(self) -> None:
+        self.new_requests += 1
+
+    def attest_without_build(self) -> str | None:
+        return {"lie": secrets.token_hex(32), "collude": self.hash, "stall": "STALL"}.get(self.mode)
+
+    @property
+    def corrupt_artifacts(self) -> bool:
+        return self.mode == "bad-artifact"
 
 
 def fixed_verdict(state: str, hash: str | None = None, **kw):
