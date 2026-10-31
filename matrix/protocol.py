@@ -52,8 +52,9 @@ class Engine:
     ):
         self.g, self.me, self.sk, self.store = g, me, sk, store
         self.peers, self.env, self.fault, self.clock = peers, env, fault, clock
-        # One request being built (held by the worker) plus at most one queued; the rest are shed.
-        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        # The build queue lives in SQLite: requests in phase RECEIVED, oldest first (LLD L30).
+        # It survives restarts and never sheds; this event only wakes the worker.
+        self.wake = asyncio.Event()
         self.ingest: collections.deque[float] = collections.deque()
         self.cursors: dict[str, float] = {}  # peer id -> that peer's `now` from the last pull
         self._last_expire = 0.0
@@ -117,22 +118,36 @@ class Engine:
         return 202, {"id": rid}
 
     def _enqueue(self, rid: str) -> None:
-        try:
-            self.queue.put_nowait(rid)
-        except asyncio.QueueFull:
-            self.store.set_phase(rid, "SHED")
-            self._log("request.shed", id=rid[:8])
+        self._log("request.queued", id=rid[:8])
+        self.wake.set()
+
+    def queued(self) -> list[str]:
+        """Live requests waiting for this builder, oldest first."""
+        rows = self.store.live_requests(self.clock(), self.g.request_ttl_s)
+        rows = [r for r in rows if r["phase"] == "RECEIVED"]
+        return [r["id"] for r in sorted(rows, key=lambda r: r["received_at"])]
 
     # --- build ------------------------------------------------------------------------------
 
     async def build_worker(self) -> None:
         while True:
-            await self._build_one(await self.queue.get())
+            todo = self.queued()
+            if not todo:
+                await (
+                    self.wake.wait()
+                )  # set by _enqueue; cleared only after waking, so no lost wakeup
+                self.wake.clear()
+                continue
+            await self._build_one(todo[0])
 
     async def _build_one(self, rid: str) -> None:
         b = self.store.get_build(rid)
         if b is not None and b["result"] is not None:
-            return  # already attested
+            self.store.set_phase(rid, "ATTESTED")  # never left in the queue
+            return
+        # Catch up before spending a build: a request may have settled while it waited in the
+        # queue or while this node was offline. Only signed attestations count (LLD L31).
+        await asyncio.gather(*(self._pull_bundle(p, rid) for p in self._peer_ids()))
         if self.is_settled(rid):
             self.store.set_phase(rid, "MISSED")
             self.store.upsert_build(rid, error="settled")
@@ -140,7 +155,8 @@ class Engine:
 
         forced = self.fault.attest_without_build()
         if forced == "STALL":
-            return  # stays RECEIVED, never attests
+            self.store.set_phase(rid, "BUILDING")  # looks stuck forever; leaves the queue
+            return
         if forced is not None:
             await self.attest(rid, forced, None)
             return
@@ -338,12 +354,17 @@ class Engine:
 
     async def _pull_bundles(self, peer: str) -> None:
         for row in self.store.live_requests(self.clock(), self.g.request_ttl_s):
-            d = await self.peers.get_json(peer, f"/v1/requests/{row['id']}/bundle")
-            envs = d.get("envelopes") if isinstance(d, dict) else None
-            if isinstance(envs, list):
-                # at most 2 attestations per signer can ever be stored
-                for env in envs[: 2 * len(self.g.nodes)]:
-                    await self.on_attest(env, peer)
+            await self._pull_bundle(peer, row["id"])
+
+    async def _pull_bundle(self, peer: str, rid: str) -> None:
+        d = await self.peers.get_json(peer, f"/v1/requests/{rid}/bundle")
+        envs = d.get("envelopes") if isinstance(d, dict) else None
+        if isinstance(envs, list):
+            # at most 2 attestations per signer can ever be stored
+            for env in envs[: 2 * len(self.g.nodes)]:
+                await self.on_attest(
+                    env, peer
+                )  # full validation; peers' verdicts are never trusted
 
     async def recover(self) -> None:
         for row in self.store.live_requests(self.clock(), self.g.request_ttl_s):

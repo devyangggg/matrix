@@ -156,7 +156,7 @@ State lives in SQLite. On start: delete leftover `work/*` and `mx-<node_id>-*` c
 | Malicious repo executing code during the build | Recipe from tagged commit, ldflags allowlist, `GOTOOLCHAIN=local`, proxy-only deps, network-off build, hardened unprivileged container |
 | Cross-network replay | Signed bytes are prefixed with `matrix/v1\0<genesis_hash>\0` |
 | Honest flake turned into `BUILD_FAILED` | `FAILED` only for a deterministic, rerun-confirmed compile error; everything else abstains |
-| Flood | 20 new requests/min/builder, 1 build slot + 1 queued, rest shed |
+| Flood | 20 new requests/min/builder; one build at a time, the rest queued in SQLite until the TTL (LLD L30) |
 | Hostile bytes to parsers | Size caps, strict keys, duplicate-key rejection, never-raise |
 
 ## 9. Quality attributes

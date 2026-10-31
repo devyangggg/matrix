@@ -303,7 +303,7 @@ class Engine:
 
 State in memory (rebuilt on restart; everything else is in SQLite):
 
-- `queue = asyncio.Queue(maxsize=1)`: the worker holds the request being built, the queue holds at most one more. `put_nowait` raising `QueueFull` → phase `SHED`.
+- The build queue is the store itself: live requests in phase `RECEIVED`, oldest `received_at` first (`Engine.queued()`). `wake = asyncio.Event()` only wakes the worker. Nothing is shed (L30).
 - `ingest = collections.deque()`: timestamps of new requests in the last 60 s.
 - `cursors: dict[node_id, float]`: pull-sync cursor per peer (peer's `now`).
 
@@ -314,11 +314,11 @@ State in memory (rebuilt on restart; everything else is in SQLite):
 3. Ingest cap: drop timestamps older than 60 s; if `len >= 20` → 429 `rate_limited`.
 4. `fault.on_new_request()` (`crash` exits here).
 5. Store with `t0 = now`, phase `RECEIVED` if `me.id in selected(...)` else `OBSERVING`. `peers.broadcast_request(e.raw)`.
-6. If selected: `queue.put_nowait(rid)` or set phase `SHED`. Return 202 `{id}`.
+6. If selected: wake the worker (the request is already queued as `RECEIVED`). Return 202 `{id}`.
 
 **`build_worker()`** loops forever:
 
-1. `rid = await queue.get()`. Skip (phase `MISSED`, reason `settled`) if `is_settled(rid)` or already attested.
+1. `rid = queued()[0]`, or wait for `wake`. Already attested → phase `ATTESTED`, skip. Otherwise pull this request's bundle from every peer through `on_attest` (L31), then skip (phase `MISSED`, reason `settled`) if `is_settled(rid)`.
 2. `fault.attest_without_build()` returns a result for `lie`/`collude`; `stall` returns the sentinel `STALL` → leave phase `RECEIVED`, `continue`.
 3. Phase `BUILDING`, `upsert_build(started_at=now)`. Attempt loop `attempt = 0..2`:
    `outcome = await wait_for(build(..., attempt, patch=fault.patch), g.build_timeout_s)` (timeout → `ERROR`).
@@ -445,14 +445,14 @@ Textual `App` with four screens (RFC §7.12): Builders (`b`), Releases (`r`, `En
 For each request in `live_requests(now, ttl)`:
 
 - `my_builds.result` set (attested) → re-broadcast own stored attestation(s). Never rebuild.
-- Phase `RECEIVED` or `BUILDING`, selected, not attested → set `RECEIVED`, enqueue (overflow → `SHED`).
+- Phase `RECEIVED` or `BUILDING`, selected, not attested → set `RECEIVED` (back in the persisted queue, oldest first).
 - Others unchanged.
 
 Then the first `sync_loop` round runs with all cursors at 0.
 
 ## 6. Phases
 
-`RECEIVED → BUILDING → ATTESTED | MISSED`, `RECEIVED → SHED`, `OBSERVING`. These are the only values written to `requests.phase`. Settlement is computed, not stored.
+`RECEIVED → BUILDING → ATTESTED | MISSED`, `OBSERVING`. `SHED` is no longer written (L30) but stays a valid value. These are the only values written to `requests.phase`. Settlement is computed, not stored.
 
 ## 7. Concurrency model
 
@@ -460,7 +460,7 @@ One process per builder, one event loop, three long-lived tasks: aiohttp server,
 
 ## 8. Logging
 
-`<ts> <node_id> <event> key=value ...`. Events: `request.new`, `request.shed`, `build.start`, `build.outcome kind=… reason=…`, `attest.sent result=…`, `attest.recv signer=…`, `evidence kind=… signer=…`, `sync.peer_error peer=…`.
+`<ts> <node_id> <event> key=value ...`. Events: `request.new`, `request.queued`, `build.start`, `build.outcome kind=… reason=…`, `attest.sent result=…`, `attest.recv signer=…`, `evidence kind=… signer=…`, `sync.peer_error peer=…`.
 
 ## 9. Error handling summary
 
@@ -502,6 +502,8 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L25 | The confirming rerun of `go build` runs only when exit code is 1 and stderr has no environmental marker; `classify_go_build` returns `ERROR` for any other code, including 0. `ARTIFACT_RETENTION_S` lives in `builder.py` (`protocol.py` keeps an unused copy) |
 | L26 | A truncated build stderr cannot prove a deterministic compile error: abstain (`ERROR`) rather than run a confirming build or attest `FAILED`. Artifact copies use private temporary files, and cancellation joins the copy before removing its work directory. |
 | L27 | Peer HTTP JSON reads are capped at 1 MiB and reject duplicate keys or non-finite numbers; finite floating-point timestamps remain valid in unsigned API metadata. Signed envelopes still reject floats during validation. |
+| L30 | **Deviates from RFC §7.6 rule 2 (team decision, needs RFC owner sign-off).** A selected builder never sheds: every request it must build stays in SQLite as `RECEIVED` and is built oldest first, also after a restart. The backlog is bounded by the ingest cap (20/min) and the TTL; requests that settle while queued cost no build (L31). |
+| L31 | Before building, the worker pulls the request's bundle from every peer through the normal `on_attest` validation and re-runs `verdict()`. A request already settled by others (while queued, or while this node was offline) is marked `MISSED`/`settled` and not built. Peers' phases and verdicts are never trusted, only signed attestations. |
 
 ## 11. Tests
 
@@ -516,7 +518,7 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | `tests/test_verdict_modelcheck.py` | RFC §9.1 model check. With R = n selection is symmetric, so fix malicious = last k nodes, k ∈ {0,1,2}. Pre-sign envelopes once and cache them. Assert (a), (b) and (c). |
 | `tests/test_fuzz.py` | 10k random mutations of valid envelopes and certificates through `parse_envelope`, `parse_certificate`, `verdict`; nothing raises |
 | `tests/test_builder_classify.py` | `classify_go_build` table; not-found marker mapping |
-| `tests/test_protocol.py` | `Engine` with a fake `build` and fake `PeerClient`: shed on the third request, persist-before-broadcast, restart re-sends without rebuilding, evidence kinds |
+| `tests/test_protocol.py` | `Engine` with a fake `build` and fake `PeerClient`: requests queue in order (never shed), settled requests are not built, persist-before-broadcast, restart re-sends without rebuilding, evidence kinds |
 | `tests/test_verify.py` | Wrong genesis, unsigned request, wrong repo, wrong tag, wrong commit, too few attestations, swapped file → correct exit codes |
 | `tests/integration/test_matrix.py` (marked `integration`) | 8 local builders (`--addrs local`, demo profile), real Docker, RFC §9.1 fault matrix |
 
