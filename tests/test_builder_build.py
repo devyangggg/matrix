@@ -5,6 +5,7 @@ import hashlib
 import os
 import pathlib
 import sys
+import threading
 import time
 
 import pytest
@@ -25,6 +26,7 @@ ldflags = "-s -w"
 output = "hello"
 """
 COMPILE_ERR = "# hello\n./main.go:5:2: undefined: x\n"
+REAL_RUN = b._run  # capture the real subprocess runner before the script fixture replaces it
 
 
 class Script:
@@ -53,24 +55,24 @@ class Script:
         if step == self.hang:
             await asyncio.sleep(3600)
         if step in self.rc:
-            return self.rc[step]
+            return (*self.rc[step], False)
         if step == "clone":
             src = argv[-1]
             os.makedirs(src)
             if self.recipe is not None:
                 pathlib.Path(f"{src}/matrix.toml").write_bytes(self.recipe)
-            return 0, "", ""
+            return 0, "", "", False
         if step == "head":
-            return 0, self.head + "\n", ""
+            return 0, self.head + "\n", "", False
         if step == "tag":
-            return 0, self.tagged + "\n", ""
+            return 0, self.tagged + "\n", "", False
         if step in ("build", "build-r"):
             res = self.builds.pop(0) if len(self.builds) > 1 else self.builds[0]
             if res[0] == 0:
                 out = next(a for a in argv if a.endswith(":/out")).split(":")[0]
                 pathlib.Path(f"{out}/hello").write_bytes(self.output)
-            return res
-        return 0, "", ""
+            return (*res, False)
+        return 0, "", "", False
 
     def steps(self) -> list[str]:
         return [self.step(c) for c in self.calls]
@@ -212,6 +214,36 @@ async def test_environmental_build_failures_abstain_without_a_rerun(genesis, env
     assert out.kind == "ERROR" and "build-r" not in script.steps() and no_work_dir(env)
 
 
+@pytest.mark.parametrize("truncated_step", ["build", "build-r"])
+async def test_truncated_real_build_stderr_abstains_even_with_a_marker_past_the_cap(
+    genesis, env, script, monkeypatch, truncated_step
+):
+    monkeypatch.setattr(b, "MAX_LOG", 128)
+    prefix = COMPILE_ERR.encode() + b"." * (b.MAX_LOG - len(COMPILE_ERR.encode()))
+    marker = b"\ngo: signal: killed"
+    captured = []
+
+    async def run_with_real_build_output(argv, log, *, container=None, env=None):
+        step = script.step(argv)
+        if step not in ("build", "build-r"):
+            return await script(argv, log, container=container, env=env)
+        script.calls.append(argv)
+        payload = prefix + marker if step == truncated_step else prefix
+        code = f"import sys; sys.stderr.buffer.write({payload!r}); sys.exit(1)"
+        result = await REAL_RUN([sys.executable, "-c", code], log)
+        captured.append((step, result[2], result[3]))
+        return result
+
+    monkeypatch.setattr(b, "_run", run_with_real_build_output)
+    out = await b.build(REQ, RID, genesis, env, 0)
+    assert out.kind == "ERROR" and out.result is None and no_work_dir(env)
+    assert captured[-1] == (truncated_step, prefix.decode(), True)
+    assert [step for step, _, _ in captured] == (
+        ["build"] if truncated_step == "build" else ["build", "build-r"]
+    )
+    assert os.path.getsize(os.path.join(env.data_dir, "logs", f"{RID}.log")) <= b.MAX_LOG
+
+
 async def test_output_over_64_mib_is_an_error_and_leaves_no_artifact(
     genesis, env, script, monkeypatch
 ):
@@ -269,6 +301,87 @@ async def test_timeout_removes_the_work_dir_and_propagates(genesis, env, script)
     assert no_work_dir(env)
 
 
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_cancel_during_artifact_copy_joins_worker_before_cleanup_and_retry(
+    genesis, env, script, monkeypatch, timeout
+):
+    first = b"first complete artifact"
+    second = b"second complete artifact"
+    script.output = first
+    started = threading.Event()
+    release = threading.Event()
+    real_store = b._store_artifact
+
+    def paused_store(src, artifacts):
+        started.set()
+        if not release.wait(5):
+            raise AssertionError("copy was never released")
+        return real_store(src, artifacts)
+
+    monkeypatch.setattr(b, "_store_artifact", paused_store)
+    build_task = asyncio.create_task(b.build(REQ, RID, genesis, env, 0))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        if timeout:
+            waiter = asyncio.create_task(asyncio.wait_for(build_task, 0.05))
+            await asyncio.sleep(0.1)
+        else:
+            build_task.cancel()
+            await asyncio.sleep(0)
+        assert not build_task.done()
+        assert pathlib.Path(env.data_dir, "work", RID, "out", "hello").read_bytes() == first
+    finally:
+        release.set()
+
+    if timeout:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(waiter, 5)
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(build_task, 5)
+    assert no_work_dir(env)
+    artifacts = pathlib.Path(env.data_dir, "artifacts")
+    assert (artifacts / hashlib.sha256(first).hexdigest()).read_bytes() == first
+
+    script.output = second
+    result = await b.build(REQ, RID, genesis, env, 1)
+    assert result.kind == "HASH"
+    assert pathlib.Path(result.artifact_path).read_bytes() == second
+    assert no_work_dir(env)
+    assert all(not path.name.startswith(".tmp-") for path in artifacts.iterdir())
+
+
+async def test_simultaneous_same_named_outputs_have_private_temp_files(tmp_path, monkeypatch):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sources = []
+    contents = [b"first artifact", b"second artifact"]
+    for index, content in enumerate(contents):
+        source = tmp_path / str(index) / "hello"
+        source.parent.mkdir()
+        source.write_bytes(content)
+        sources.append(source)
+    opened = []
+    barrier = threading.Barrier(2)
+    original_temp = b.tempfile.NamedTemporaryFile
+
+    def synced_temp(*args, **kwargs):
+        file = original_temp(*args, **kwargs)
+        opened.append(file.name)
+        barrier.wait(timeout=5)  # both copies hold their own temp file before writing
+        return file
+
+    monkeypatch.setattr(b.tempfile, "NamedTemporaryFile", synced_temp)
+    results = await asyncio.gather(
+        *(asyncio.to_thread(b._store_artifact, str(source), str(artifacts)) for source in sources)
+    )
+    assert len(set(opened)) == 2
+    for (digest, path), content in zip(results, contents):
+        assert digest == hashlib.sha256(content).hexdigest()
+        assert pathlib.Path(path).read_bytes() == content
+    assert len(list(artifacts.iterdir())) == 2
+
+
 def test_retry_attempts_append_to_one_capped_log(env, monkeypatch):
     log = b._Log(os.path.join(env.data_dir, "l.log"), 0)
     monkeypatch.setattr(b, "MAX_LOG", 10)
@@ -312,8 +425,9 @@ async def test_step_output_is_capped_in_memory_and_in_the_log(tmp_path, monkeypa
     monkeypatch.setattr(b, "MAX_LOG", 100_000)
     log = b._Log(str(tmp_path / "l.log"), 0)
     code = "import sys; sys.stdout.write('x' * 3_000_000); sys.stderr.write('e' * 3_000_000)"
-    rc, out, err = await b._run([sys.executable, "-c", code], log)
+    rc, out, err, truncated = await b._run([sys.executable, "-c", code], log)
     assert rc == 0 and len(out) == len(err) == 100_000
+    assert truncated
     assert os.path.getsize(log.path) <= 100_000
 
 

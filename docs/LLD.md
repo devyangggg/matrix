@@ -500,6 +500,8 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L23 | `matrix.toml` must be a regular file of at most 4 KiB (checked with `lstat`, so a symlink is never followed) or the outcome is `BAD_RECIPE`; the build output is opened with `O_NOFOLLOW` and a non-regular or oversized file is `ERROR` |
 | L24 | The 512 MiB source-size cap is checked after checkout, not while cloning; the build timeout bounds a hostile clone. Each step keeps at most 1 MiB per output stream in memory and 1 MiB per request in `logs/<rid>.log` across all attempts |
 | L25 | The confirming rerun of `go build` runs only when exit code is 1 and stderr has no environmental marker; `classify_go_build` returns `ERROR` for any other code, including 0. `ARTIFACT_RETENTION_S` lives in `builder.py` (`protocol.py` keeps an unused copy) |
+| L26 | A truncated build stderr cannot prove a deterministic compile error: abstain (`ERROR`) rather than run a confirming build or attest `FAILED`. Artifact copies use private temporary files, and cancellation joins the copy before removing its work directory. |
+| L27 | Peer HTTP JSON reads are capped at 1 MiB and reject duplicate keys or non-finite numbers; finite floating-point timestamps remain valid in unsigned API metadata. Signed envelopes still reject floats during validation. |
 
 ## 11. Tests
 

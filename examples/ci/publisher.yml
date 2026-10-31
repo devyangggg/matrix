@@ -8,6 +8,8 @@
 # Setup:
 #   secrets.MATRIX_RELEASE_KEY  the release signer's key file content (64 hex)
 #   genesis.json                checked into this repo next to the workflow, or on the runner
+#   vars.MATRIX_VERIFIER_COMMIT  reviewed, immutable 40-character lowercase Matrix source
+#                                commit SHA (required; installation fails without it)
 name: matrix-release
 
 on:
@@ -24,8 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install matrix
-        run: pip install "git+https://github.com/ChaoticNebula5/Matrix@main"
+      - name: Install reviewed matrix verifier
+        env:
+          MATRIX_VERIFIER_COMMIT: ${{ vars.MATRIX_VERIFIER_COMMIT }}
+        run: |
+          [[ "$MATRIX_VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "Set MATRIX_VERIFIER_COMMIT to a reviewed Matrix commit SHA" >&2; exit 1; }
+          pip install "git+https://github.com/ChaoticNebula5/Matrix@${MATRIX_VERIFIER_COMMIT}"
 
       - name: Certify
         env:
@@ -38,7 +44,7 @@ jobs:
           trap 'rm -f "$key"' EXIT
           matrix release \
             --repo "https://github.com/${GITHUB_REPOSITORY}" \
-            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --tag "$GITHUB_REF_NAME" --commit "$(git rev-parse HEAD)" \
             --key "$key" --wait 600 --out dist/ --output hello
 
       - name: Upload binary and certificate

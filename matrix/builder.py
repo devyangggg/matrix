@@ -12,6 +12,7 @@ import re
 import shutil
 import signal
 import stat
+import tempfile
 from dataclasses import dataclass
 
 from .genesis import Genesis
@@ -168,12 +169,15 @@ class _Log:
         self.used += len(data)
 
 
-async def _drain(stream: asyncio.StreamReader, limit: int) -> bytes:
-    """Read to EOF but keep only the first `limit` bytes, so hostile output cannot fill memory."""
+async def _drain(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]:
+    """Drain to EOF, retaining only a bounded prefix and whether bytes were discarded."""
     kept = bytearray()
+    truncated = False
     while chunk := await stream.read(_CHUNK):
-        kept += chunk[: max(0, limit - len(kept))]
-    return bytes(kept)
+        room = max(0, limit - len(kept))
+        kept += chunk[:room]
+        truncated |= len(chunk) > room
+    return bytes(kept), truncated
 
 
 async def _quiet(*argv: str) -> bytes:
@@ -217,8 +221,8 @@ async def _kill(proc: asyncio.subprocess.Process, container: str | None) -> None
 
 async def _run(
     argv: list[str], log: _Log, *, container: str | None = None, env: dict | None = None
-) -> tuple[int, str, str]:
-    """Run one step; return (rc, stdout, stderr). On cancellation or timeout, kill and re-raise."""
+) -> tuple[int, str, str, bool]:
+    """Run one step; return (rc, stdout, stderr, stderr_truncated). Kill on cancellation."""
     log.write(b"$ " + " ".join(argv).encode("utf-8", "replace") + b"\n")
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -234,14 +238,16 @@ async def _run(
     assert proc.stdout is not None and proc.stderr is not None  # PIPE was requested
     finished = False
     try:
-        out, err = await asyncio.gather(_drain(proc.stdout, MAX_LOG), _drain(proc.stderr, MAX_LOG))
+        (out, _), (err, err_truncated) = await asyncio.gather(
+            _drain(proc.stdout, MAX_LOG), _drain(proc.stderr, MAX_LOG)
+        )
         rc = await proc.wait()
         finished = True
     finally:
         if not finished:
             await _kill(proc, container)
     log.write(out + err)
-    return rc, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+    return rc, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), err_truncated
 
 
 # --- build steps ----------------------------------------------------------------------------
@@ -261,7 +267,8 @@ async def _fetch_source(req: Request, work: str, log: _Log, patch: str | None) -
     src = f"{work}/src"
 
     async def git(*args: str) -> tuple[int, str, str]:
-        return await _run(["git", *args], log, env=git_env)
+        rc, out, err, _ = await _run(["git", *args], log, env=git_env)
+        return rc, out, err
 
     rc, _, err = await git("clone", "--filter=blob:none", "--no-checkout", "--", req.repo_url, src)
     if rc != 0:
@@ -307,35 +314,43 @@ def _read_recipe(src: str, g: Genesis):
 
 
 def _store_artifact(src_file: str, artifacts: str) -> tuple[str, str]:
-    """Hash while copying to artifacts/<hash>.tmp, fsync, rename, fsync the directory."""
+    """Hash while copying to a private temp file, fsync, rename, fsync the directory."""
     # O_NONBLOCK: opening a FIFO with no writer must not block a worker thread forever.
     fd = os.open(src_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as f:
-        st = os.fstat(f.fileno())
-        if not stat.S_ISREG(st.st_mode):
-            raise _Stop("ERROR", "output is not a regular file")
-        if st.st_size > MAX_ARTIFACT:
-            raise _Stop("ERROR", "output larger than 64 MiB")
-        h, size = hashlib.sha256(), 0
-        tmp = os.path.join(artifacts, f".tmp-{os.getpid()}-{os.path.basename(src_file)}")
-        with open(tmp, "wb") as out:
-            while chunk := f.read(_CHUNK):
-                size += len(chunk)
-                if size > MAX_ARTIFACT:
-                    raise _Stop("ERROR", "output larger than 64 MiB")
-                h.update(chunk)
-                out.write(chunk)
-            out.flush()
-            os.fsync(out.fileno())
-    digest = h.hexdigest()
-    final = os.path.join(artifacts, digest)
-    os.replace(tmp, final)
-    dfd = os.open(artifacts, os.O_RDONLY)
+    tmp = None
     try:
-        os.fsync(dfd)
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise _Stop("ERROR", "output is not a regular file")
+            if st.st_size > MAX_ARTIFACT:
+                raise _Stop("ERROR", "output larger than 64 MiB")
+            h, size = hashlib.sha256(), 0
+            # Concurrent attempts can have the same output name; never share a temp path.
+            with tempfile.NamedTemporaryFile(dir=artifacts, prefix=".tmp-", delete=False) as out:
+                tmp = out.name
+                while chunk := f.read(_CHUNK):
+                    size += len(chunk)
+                    if size > MAX_ARTIFACT:
+                        raise _Stop("ERROR", "output larger than 64 MiB")
+                    h.update(chunk)
+                    out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
+        digest = h.hexdigest()
+        final = os.path.join(artifacts, digest)
+        os.replace(tmp, final)
+        tmp = None
+        dfd = os.open(artifacts, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+        return digest, final
     finally:
-        os.close(dfd)
-    return digest, final
+        if tmp is not None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
 
 
 async def build(
@@ -369,26 +384,47 @@ async def build(
         # 2. dependencies: any failure here is environmental
         common = docker_common(env, rid, attempt, "deps")
         argv = deps_argv(common, work, image)
-        rc, _, err = await _run(argv, log, container=names[0])
+        rc, _, err, _ = await _run(argv, log, container=names[0])
         if rc != 0:
             raise _Stop("ERROR", f"go mod download failed (rc={rc}): {err.strip()[:200]}")
 
         # 3. build, with a single confirming rerun for a compile error
         argv = build_argv(docker_common(env, rid, attempt, "build"), work, image, recipe)
-        rc, _, err = await _run(argv, log, container=names[1])
+        rc, _, err, truncated = await _run(argv, log, container=names[1])
         if rc != 0:
             rerun_rc = rerun_err = None
-            if rc == 1 and not any(m in err.lower() for m in ENV_MARKERS):
+            rerun_truncated = False
+            if rc == 1 and not truncated and not any(m in err.lower() for m in ENV_MARKERS):
                 argv = build_argv(docker_common(env, rid, attempt, "build-r"), work, image, recipe)
-                rerun_rc, _, rerun_err = await _run(argv, log, container=names[2])
-            if classify_go_build(rc, err, rerun_rc, rerun_err, work) == "FAILED":
+                rerun_rc, _, rerun_err, rerun_truncated = await _run(argv, log, container=names[2])
+            # A truncated prefix cannot establish a deterministic compile error: the omitted
+            # suffix may contain an environmental marker or a difference between attempts.
+            if (
+                not truncated
+                and not rerun_truncated
+                and classify_go_build(rc, err, rerun_rc, rerun_err, work) == "FAILED"
+            ):
                 return Outcome("FAILED", "FAILED", None, "deterministic compile error")
             raise _Stop("ERROR", f"go build failed (rc={rc}): {err.strip()[:200]}")
 
         # 4. hash and keep
+        # Shield the thread and join it on cancellation before removing work/<rid>.
+        # asyncio.to_thread itself would continue copying after the awaiting task is cancelled.
         out_file = os.path.join(work, "out", recipe.output)
+        copy_task = asyncio.create_task(asyncio.to_thread(_store_artifact, out_file, artifacts))
         try:
-            digest, path = await asyncio.to_thread(_store_artifact, out_file, artifacts)
+            digest, path = await asyncio.shield(copy_task)
+        except asyncio.CancelledError:
+            while not copy_task.done():
+                try:
+                    await asyncio.shield(copy_task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:  # noqa: BLE001  copy failure must not mask cancellation
+                    break
+            if not copy_task.cancelled():
+                copy_task.exception()  # consume an I/O error without masking cancellation
+            raise
         except OSError as e:
             raise _Stop("ERROR", f"cannot read build output: {e.strerror}") from e
         return Outcome("HASH", digest, path, "ok")

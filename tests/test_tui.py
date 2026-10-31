@@ -35,6 +35,7 @@ def peers(genesis, release_env, attest, rid):
                 "now": 2,
                 "requests": [{"id": rid, "phase": "ATTESTED", "received_at": 1}, "junk"],
             },
+            f"/v1/requests/{rid}": {"request": release_env},
             f"/v1/requests/{rid}/bundle": {"request": release_env, "envelopes": atts},
             f"/v1/requests/{rid}/log": b"go build ./cmd/hello\nok\n",
             "/v1/evidence?since=0": {
@@ -65,9 +66,37 @@ async def test_poll_releases_rejects_request_with_wrong_id(peers, genesis, rid, 
 
     body = {"v": 1, "repo_url": "https://github.com/org/hello", "commit": "2" * 40, "tag": "x"}
     swapped = make_envelope("release", "ci-release", body, keys["ci-release"], genesis)
-    peers.responses["builder1"][f"/v1/requests/{rid}/bundle"]["request"] = swapped
+    peers.responses["builder1"][f"/v1/requests/{rid}"]["request"] = swapped
     [r] = await poll_releases(peers, genesis, "builder1")
     assert r.verdict.state == "INVALID" and r.body is None
+
+
+async def test_poll_releases_ignores_bundle_request_substitution(peers, genesis, rid, keys):
+    from matrix.model import make_envelope
+
+    body = {"v": 1, "repo_url": "https://github.com/org/hello", "commit": "2" * 40, "tag": "x"}
+    swapped = make_envelope("release", "ci-release", body, keys["ci-release"], genesis)
+    peers.responses["builder1"][f"/v1/requests/{rid}/bundle"]["request"] = swapped
+    [r] = await poll_releases(peers, genesis, "builder1")
+    assert r.body["tag"] == "v1.2.0"
+    assert r.verdict.state == "AGREED" and r.verdict.hash == H
+
+
+async def test_poll_releases_missing_bundle_is_invalid_not_pending(peers, genesis, rid):
+    del peers.responses["builder1"][f"/v1/requests/{rid}/bundle"]
+    [r] = await poll_releases(peers, genesis, "builder1")
+    assert r.body["tag"] == "v1.2.0"
+    assert r.verdict.state == "INVALID"
+
+
+async def test_poll_releases_rejects_bad_signature(peers, genesis, rid):
+    request = peers.responses["builder1"][f"/v1/requests/{rid}"]["request"]
+    peers.responses["builder1"][f"/v1/requests/{rid}"]["request"] = {
+        **request,
+        "sig": "0" * 128,
+    }
+    [r] = await poll_releases(peers, genesis, "builder1")
+    assert r.body is None and r.verdict.state == "INVALID"
 
 
 async def test_poll_releases_unreachable_or_garbage(peers, genesis):
@@ -129,6 +158,25 @@ async def test_screens(peers, genesis, rid):
 
         await pilot.press("b")
         assert len(_cells(app)) == 8
+
+
+async def test_evidence_disagree_single_vote_is_unverified(peers, genesis, rid):
+    signed_vote = peers.responses["builder1"][f"/v1/requests/{rid}/bundle"]["envelopes"][0]
+    peers.responses["builder1"]["/v1/evidence?since=0"]["evidence"] = [
+        {
+            "kind": "DISAGREE",
+            "signer": signed_vote["signer"],
+            "request_id": rid,
+            "proof": [signed_vote],
+        }
+    ]
+    app = MatrixTui(genesis, "builder1", peers=peers)
+    async with app.run_test() as pilot:
+        await pilot.press("e")
+        [row] = _cells(app)
+        assert row[0] == "DISAGREE" and row[4] == "unverified"
+        await pilot.press("enter")
+        assert "proof (unverified)" in _text(app, "#extra")
 
 
 async def test_cli_tui_rejects_unknown_node(tmp_path, genesis_dict):
