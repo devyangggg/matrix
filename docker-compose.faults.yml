@@ -12,18 +12,25 @@ services:
     volumes:
       - ./examples/faults:/etc/matrix/faults:ro
 
-  # Scene 3 (a whole laptop is hacked): uncomment both, set H to the backdoored hash.
+  # Scene 3 (whole compromised laptop): uncomment both and supply BACKDOOR_HASH
+  # in .env. Both attestations are below the three-builder threshold.
   # builder5:
   #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder5, --key, /etc/matrix/keys/builder5.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder5",
-  #             --allow-faults, --fault, collude, --hash, "<64 hex>"]
+  #             --allow-faults, --fault, collude, --hash, "${BACKDOOR_HASH:?set backdoor hash}"]
   # builder6:
   #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder6, --key, /etc/matrix/keys/builder6.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder6",
-  #             --allow-faults, --fault, collude, --hash, "<64 hex>"]
+  #             --allow-faults, --fault, collude, --hash, "${BACKDOOR_HASH:?set backdoor hash}"]
 
   # Scene 6 (caught cheater):
   # builder2:
   #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder2, --key, /etc/matrix/keys/builder2.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder2",
   #             --allow-faults, --fault, equivocate]
+
+  # Other fault-matrix scenes: apply one command at a time to a chosen builder.
+  # --allow-faults --fault lie          (random dishonest vote)
+  # --allow-faults --fault stall        (no vote, no build)
+  # --allow-faults --fault bad-artifact (valid vote, corrupted download)
+  # --allow-faults --fault equivocate   (two signed, conflicting votes)
 
   # crash: also set restart: "no", otherwise compose restarts it in a loop.
   # builder7:

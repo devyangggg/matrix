@@ -490,6 +490,8 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L11 | `ruff` (lint + format, line length 100) is the only extra dev tool |
 | L12 | Deterministic test keys: seed = `sha256(b"matrix-test:" + id)`; golden vectors in `tests/vectors/` |
 | L13 | Real genesis keys are generated on each laptop with `matrix keygen`; only public keys are collected |
+| L20 | The development genesis generator refuses to overwrite existing private keys; reruns require a fresh output directory. |
+| L21 | Invalid `since` query values on read-only listing routes use the default cursor 0. |
 
 ## 11. Tests
 
