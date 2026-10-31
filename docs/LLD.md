@@ -496,6 +496,7 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L17 | `Engine.on_request` also returns 413 for a body over 4096 bytes (same as `on_attest` over 1024); `net` enforces the limit too |
 | L20 | The development genesis generator refuses to overwrite existing private keys; reruns require a fresh output directory. |
 | L21 | Invalid `since` query values on read-only listing routes use the default cursor 0. |
+| L22 | TUI caps each untrusted HTTP JSON response at 1 MiB; rejects duplicate keys and non-finite numbers but accepts finite floating-point timestamps in unsigned API metadata. Signed envelopes still reject floats during validation. |
 
 ## 11. Tests
 
