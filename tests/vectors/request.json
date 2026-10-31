@@ -1,0 +1,10 @@
+{
+  "body": {
+    "v": 1,
+    "repo_url": "https://github.com/org/hello",
+    "commit": "1111111111111111111111111111111111111111",
+    "tag": "v1.2.0"
+  },
+  "canonical": "{\"commit\":\"1111111111111111111111111111111111111111\",\"repo_url\":\"https://github.com/org/hello\",\"tag\":\"v1.2.0\",\"v\":1}",
+  "request_id": "8f6398d65218a75e858e3b0d2ff9435902d5bf21c1b8f579900ae0f529359e0a"
+}
