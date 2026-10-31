@@ -1,0 +1,5 @@
+# Files executed or applied inside Linux/WSL must keep LF even on a Windows checkout with
+# core.autocrlf: a CRLF shell script fails in bash and a CRLF patch no longer applies.
+*.sh text eol=lf
+*.patch text eol=lf
+examples/sample-repo/** text eol=lf
