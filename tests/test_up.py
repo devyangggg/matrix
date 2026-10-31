@@ -222,7 +222,7 @@ def test_up_founds_writes_files_and_starts_the_node(home, monkeypatch):
     result = asyncio.run(_result())
     seen = []
 
-    async def fake_ceremony(params, name, sk, rsk, bus, ask):
+    async def fake_ceremony(params, name, sk, rsk, bus, ask, **kw):
         seen.append((params, name, pubkey_hex(sk), pubkey_hex(rsk)))
         return result
 
@@ -245,7 +245,7 @@ def test_up_founds_writes_files_and_starts_the_node(home, monkeypatch):
 def test_up_creates_private_keys_on_first_run(home, monkeypatch):
     h, _ = home
 
-    async def abort(*a):
+    async def abort(*a, **kw):
         return None
 
     monkeypatch.setattr(cli, "ceremony", abort)
@@ -266,7 +266,7 @@ def test_up_skips_the_ceremony_once_founded(home, monkeypatch):
     (h / "genesis.sha256").write_text(g.hash + "\n")
     (h / "endorsements.json").write_bytes(canonical_json(endorsements))
 
-    async def must_not_run(*a):
+    async def must_not_run(*a, **kw):
         raise AssertionError("ceremony ran again")
 
     monkeypatch.setattr(cli, "ceremony", must_not_run)
@@ -299,7 +299,7 @@ def test_up_refuses_a_key_that_is_not_in_genesis(home, monkeypatch):
     _keys(h, name="stranger")
     result = asyncio.run(_result())
 
-    async def fake_ceremony(*a):
+    async def fake_ceremony(*a, **kw):
         return result
 
     monkeypatch.setattr(cli, "ceremony", fake_ceremony)
@@ -316,7 +316,7 @@ def test_refound_archives_the_old_network(home, monkeypatch):
     (h / "data").mkdir()
     (h / "data" / "matrix.db").write_text("old releases")
 
-    async def fake_ceremony(*a):
+    async def fake_ceremony(*a, **kw):
         return result
 
     monkeypatch.setattr(cli, "ceremony", fake_ceremony)
@@ -346,3 +346,50 @@ def test_up_needs_network_toml(home, monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
     assert "network.toml" in capsys.readouterr().err
+
+
+def _double_enter(queue: asyncio.Queue):
+    """laptop-a's user presses Enter twice to seal: one stale line stays queued, like the real
+    stdin reader. At the y/N prompt they type `y` only if nothing stale answered first."""
+
+    async def ask(kind):
+        if kind == "seal":
+            await asyncio.sleep(0.02)
+            queue.put_nowait("\n")  # the second press
+            return "\n"
+        if queue.empty():
+            queue.put_nowait("y\n")
+        return await queue.get()
+
+    return ask
+
+
+async def _found_with_double_enter(drain_a: bool):
+    hub, q = Hub(), asyncio.Queue()
+
+    def drain():
+        while not q.empty():
+            q.get_nowait()
+
+    tasks = []
+    for i, name in enumerate(NAMES):
+        ask = _double_enter(q) if i == 0 else answers()
+        extra = {"drain": drain} if (i == 0 and drain_a) else {}
+        tasks.append(
+            cli.ceremony(
+                PARAMS, name, node_key(name), release_key(name), MemBus(hub, i), ask,
+                timeout=1.0, interval=0.01, **extra,
+            )
+        )  # fmt: skip
+    return await asyncio.gather(*tasks)
+
+
+async def test_extra_enter_does_not_answer_the_confirmation():
+    results = await _found_with_double_enter(drain_a=True)
+    assert all(r is not None for r in results)
+
+
+async def test_without_drain_a_stale_enter_aborts_the_ceremony():
+    # the bug the drain fixes: the stale "\n" answered y/N, laptop-a aborted, the others waited
+    results = await _found_with_double_enter(drain_a=False)
+    assert results == [None, None, None, None]

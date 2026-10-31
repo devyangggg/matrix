@@ -353,3 +353,16 @@ def test_endorsements_for_another_genesis_or_forged_do_not_count():
     assert d.parse_endorse(canonical_json(wrong), pubkeys).genesis_hash == other.hash
     assert d.parse_endorse(b"garbage", pubkeys) is None
     assert d.parse_endorse(canonical_json(ends[0]), {}) is None
+
+
+@pytest.mark.parametrize("platform, expected", [("darwin", True), ("linux", False)])
+def test_reuse_port_only_on_macos(monkeypatch, platform, expected):
+    if not hasattr(socket, "SO_REUSEPORT"):
+        pytest.skip("no SO_REUSEPORT on this OS")
+    monkeypatch.setattr(d.sys, "platform", platform)
+    s = d.udp_socket(0)  # port 0: any free port, so the test never touches 7788
+    try:
+        assert bool(s.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT)) is expected
+        assert s.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
+    finally:
+        s.close()

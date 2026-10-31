@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 import socket
+import sys
 import time
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
@@ -206,6 +207,10 @@ def udp_socket(port: int | None) -> socket.socket:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         if port is not None:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if sys.platform == "darwin" and hasattr(socket, "SO_REUSEPORT"):
+                # BSD sockets share a wildcard UDP port between processes only with
+                # SO_REUSEPORT. Linux is left as is: there it would spread datagrams instead.
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             s.bind(("0.0.0.0", port))
         s.setblocking(False)
         return s

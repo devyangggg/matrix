@@ -609,10 +609,11 @@ async def ceremony(
     ask,
     timeout: float = CEREMONY_TIMEOUT_S,
     interval: float = FOUNDER_INTERVAL_S,
+    drain=lambda: None,
 ) -> tuple[dict, list[dict], bytes] | None:
     """Found the network with the other laptops. Returns (genesis, endorsements, own endorse)
     or None if aborted; nothing is written here. `ask(kind)` returns the next typed line for the
-    question `kind` ("seal": Enter, "confirm": y/N)."""
+    question `kind` ("seal": Enter, "confirm": y/N). `drain()` drops lines typed ahead."""
     loop = asyncio.get_running_loop()
     nid, me_pub = params["name"], pubkey_hex(sk)
     own = make_founder(params, name, sk, release_sk)
@@ -669,6 +670,7 @@ async def ceremony(
         for n in g.nodes:
             _out(f"  {n.id:<24} {n.pubkey[:8]}")
         _out(f"Short code: {short_code(g.hash)}")
+        drain()  # an extra Enter pressed while sealing must not answer the y/N question
         _out("Read it aloud. Do all screens show this code and this list? [y/N]")
         if (await ask("confirm")).strip().lower() != "y":
             _err("aborted: nothing written")
@@ -815,7 +817,17 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
             return EXIT_ERROR
         try:
             lines = _stdin_lines()
-            result = await ceremony(params, name, sk, release_sk, UdpBus(), lambda _: lines.get())
+
+            def drain() -> None:
+                eof = False
+                while not lines.empty():
+                    eof |= lines.get_nowait() == ""
+                if eof:
+                    lines.put_nowait("")  # keep end-of-input, or the y/N prompt would wait forever
+
+            result = await ceremony(
+                params, name, sk, release_sk, UdpBus(), lambda _: lines.get(), drain=drain
+            )
         except OSError as e:
             _err(f"cannot use UDP port {DISCOVERY_PORT}: {e} (is `matrix up` already running?)")
             return EXIT_ERROR

@@ -37,8 +37,9 @@ done
 
 # A deterministic compile error: an undefined name.
 recipe v0.9.0-broken
-sed -i 's/fmt.Println("hello from matrix " + version)/fmt.Println("hello from matrix " + versio)/' \
-    cmd/hello/main.go
+# Portable on GNU and BSD/macOS sed: no in-place flag; write a temp file, then move it.
+sed 's/fmt.Println("hello from matrix " + version)/fmt.Println("hello from matrix " + versio)/' \
+    cmd/hello/main.go > cmd/hello/main.go.tmp && mv cmd/hello/main.go.tmp cmd/hello/main.go
 commit_tag v0.9.0-broken
 git checkout -q v1.2.5 -- cmd/hello/main.go
 
