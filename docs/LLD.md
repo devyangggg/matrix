@@ -494,6 +494,8 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L15 | `Engine.on_request` returns 403 when the signer is not a release signer **or** `repo_url` is not in `allowed_repos` (RFC §7.9 / openapi), 400 for other invalid envelopes. LLD §3.9 step 1 only named the signer case |
 | L16 | `Engine.fault` is a public attribute; `net` reads `engine.fault.corrupt_artifacts` for `bad-artifact` (`make_app` has no fault parameter) |
 | L17 | `Engine.on_request` also returns 413 for a body over 4096 bytes (same as `on_attest` over 1024); `net` enforces the limit too |
+| L20 | The development genesis generator refuses to overwrite existing private keys; reruns require a fresh output directory. |
+| L21 | Invalid `since` query values on read-only listing routes use the default cursor 0. |
 
 ## 11. Tests
 
