@@ -1,7 +1,9 @@
 # Consumer CI (RFC §7.11): download a release and refuse it unless Matrix certified this exact
-# binary for this repo and tag. No mesh access is needed: `matrix verify` is fully offline.
+# binary for this repo and tag. No access to the builders' LAN is needed: `matrix verify` is
+# fully offline.
 #
-# The consumer pins the network: genesis.json and its hash are checked into the consumer's own
+# The consumer pins the network: genesis.json and its hash, as published by the founders after
+# the founding ceremony (project README, never the release page alone), are checked into the consumer's own
 # repo (reviewed once, like a lockfile). The download location (GitHub Releases) is untrusted.
 # Only exit code 0 (REPRODUCED) passes; 1 MISMATCH, 2 INVALID_CERT and 4 error all fail.
 # Setup: set repository Actions variable MATRIX_VERIFIER_COMMIT to a reviewed, immutable

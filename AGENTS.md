@@ -2,7 +2,7 @@
 
 Read this before you write any code in this repository. It applies to every human and every coding agent on the team.
 
-Matrix is a Byzantine-tolerant release gate for Go binaries. 8 builders each build a tagged commit, and a release is certified when 3 of them signed the same hash. It is a 12-hour hackathon MVP built by **4 people, each driving coding agents on a separate track**. **Keep it simple.** The smallest code that meets the spec wins.
+Matrix is a Byzantine-tolerant release gate for Go binaries. n builders each build a tagged commit, and a release is certified when f+1 of them signed the same hash. The demo (RFC rev 5) is 4 laptops on a phone hotspot, one builder each: n = 4, f = 1, threshold 2; the laptops found the network with `matrix up` and discover each other's addresses. It is a 12-hour hackathon MVP built by **4 people, each driving coding agents on a separate track**. **Keep it simple.** The smallest code that meets the spec wins.
 
 ## 0. Start here
 
@@ -15,13 +15,13 @@ Matrix is a Byzantine-tolerant release gate for Go binaries. 8 builders each bui
 
 | Doc | Use it for | Status |
 |---|---|---|
-| [Matrix_RFC_001.md](Matrix_RFC_001.md) | **The spec.** Protocol, parameters, security rules, exit codes. Wins every conflict. | Done |
+| [Matrix_RFC_001.md](Matrix_RFC_001.md) | **The spec (rev 5).** Protocol, parameters, founding ceremony, discovery, security rules, exit codes. Wins every conflict. | Done (rev 5) |
 | [docs/LLD.md](docs/LLD.md) | Function signatures, module contracts, file formats, tests. **The frozen contract (§5).** | Done |
 | [docs/openapi.yaml](docs/openapi.yaml) | The exact HTTP contract. | Done |
 | [docs/HLD.md](docs/HLD.md) | Components, layering, flows, trust boundaries. | Done |
 | `AGENTS.md` (this file) | Team, ownership, tasks, workflow, quality gates. | Done |
-| `docs/OPS.md` | Laptop setup: OS, Docker, tinc, keys, genesis distribution, pre-pull, venue network. | **To write: task C1** |
-| `docs/DEMO.md` | Demo runbook: the 6 scenes from RFC §9.2, exact commands, expected output, reset steps, fallbacks. | **To write: task D5** |
+| [docs/OPS.md](docs/OPS.md) | Per-laptop setup: WSL2 mirrored networking, firewall (UDP 7788, TCP 7700), Docker, pre-pull, phone hotspot, `matrix up`, publishing the genesis pin, troubleshooting. tinc/WireGuard optional. | Rev 5 rewrite |
+| [docs/DEMO.md](docs/DEMO.md) | Demo runbook: the 7 scenes from RFC §9.2 (rev 5), exact commands, expected output, reset steps, fallbacks. | Rev 5 rewrite |
 | `examples/ci/` | Publisher and consumer CI examples (RFC §7.11). | **To write: task D5** |
 
 If two documents disagree, follow the RFC, then **stop and report the conflict** (§12). Do not silently pick one. If something is unspecified, choose the simplest option, add a row to LLD §10 in the same PR, and say so in the PR.
@@ -37,7 +37,7 @@ To let agents work in parallel, we needed decisions the RFC, HLD and LLD did not
 | When interfaces freeze; how to change one; how to work before a dependency lands | §5 |
 | Shared test fixtures, deterministic test keys, golden vectors that all tracks agree on | §5.3 |
 | Exact `pyproject.toml`, tooling, lint and format rules | §8 |
-| A task backlog with IDs, dependencies and acceptance tests | §6 |
+| A task backlog with IDs, dependencies and acceptance tests | §6 (rev 5 tasks: §6.1) |
 | Git branching, PR, review and merge rules for 4 people plus agents | §7 |
 | CI quality gates | §8.3 |
 | The sample Go repository used for builds and the demo | §10 |
@@ -53,8 +53,8 @@ To let agents work in parallel, we needed decisions the RFC, HLD and LLD did not
 |---|---|---|---|
 | **A: Core and protocol** | `TBD-A` | Pure core, verdict and the protocol engine. Owns the shared test kit. | `canon`, `crypto`, `genesis`, `model`, `select`, `verdict`, `protocol` |
 | **B: Build and storage** | `TBD-B` | Reproducible hardened builds, SQLite store, sample Go repo, image pin. | `builder`, `store` |
-| **C: Network and ops** | `TBD-C` | HTTP server and peer client, node entrypoint, faults, tinc, compose, genesis files, integration harness. | `net`, `node`, `faults` |
-| **D: Clients and demo** | `TBD-D` | `matrix` CLI, TUI, certificate flow, demo runbook, CI examples. | `cli`, `tui` |
+| **C: Network and ops** | `TBD-C` | HTTP server and peer client, address discovery, node entrypoint, faults, hotspot setup (tinc optional), compose, `network.toml`, genesis files, integration harness. | `net`, `discovery`, `node`, `faults` |
+| **D: Clients and demo** | `TBD-D` | `matrix` CLI (including the `matrix up` founding ceremony), TUI, certificate flow, demo runbook, CI examples. | `cli`, `tui` |
 
 ### 3.2 File ownership
 
@@ -64,7 +64,7 @@ Only the owner (or the owner's agents) edits these files. Anyone may **read** ev
 |---|---|
 | A | `pyproject.toml`, `matrix/__init__.py`, `matrix/{canon,crypto,genesis,model,select,verdict,protocol}.py`, `tests/conftest.py`, `tests/fakes.py`, `tests/vectors/`, `tests/test_{canon,crypto,genesis,model,select,verdict,verdict_modelcheck,fuzz,protocol}.py`, `.github/workflows/ci.yml` |
 | B | `matrix/{builder,store}.py`, `tests/test_{builder_classify,store}.py`, `tests/integration/test_builder.py`, `Dockerfile`, `examples/faults/backdoor.patch`, the sample repo (§10) |
-| C | `matrix/{net,node,faults}.py`, `tests/test_{net,faults}.py`, `tests/integration/{harness.py,test_matrix.py}`, `scripts/`, `docker-compose*.yml`, `.env.example`, `genesis.json`, `genesis.demo.json`, `docs/OPS.md` |
+| C | `matrix/{net,discovery,node,faults}.py`, `tests/test_{net,discovery,faults}.py`, `tests/integration/{harness.py,test_matrix.py}`, `scripts/`, `docker-compose*.yml`, `.env.example`, `network.toml`, `genesis.json`, `genesis.demo.json`, `docs/OPS.md` |
 | D | `matrix/{cli,tui}.py`, `tests/test_{cli,verify,tui}.py`, `docs/DEMO.md`, `examples/ci/` |
 | Shared (any track, small appended edits only) | `docs/LLD.md` §10 rows, `.gitignore`, this file's §4 table |
 | Humans only | `Matrix_RFC_001.md`, §3–§7 of this file |
@@ -79,11 +79,11 @@ Agents must not guess these. Fill the table in the first 30 minutes and commit i
 | H2 | GitHub org that hosts the sample repo | B | TBD (placeholder `<org>`) |
 | H3 | Sample repo URL (§10) | B | `https://github.com/<org>/matrix-hello` |
 | H4 | Go toolchain image: `golang:1.23`, pinned `linux/amd64` digest | B | `golang@sha256:TBD` |
-| H5 | Measured `build_timeout_s` (two builds at once per laptop, RFC §9.1) | B | TBD (default 150 full / 45 demo) |
-| H6 | Laptop names, LAN IPs, tinc IPs `10.77.0.1–4`, which builders run where | C | laptopA..D → builder1..8 as in HLD §5.1 |
-| H7 | Venue network plan (travel router or phone hotspot) and fallback (LAN / WireGuard) | C | TBD |
-| H8 | Release-signer keys: who holds `maintainer-*` and `ci-release` | D | TBD |
-| H9 | Machine used for offline `matrix verify` in the demo | D | TBD |
+| H5 | Measured `build_timeout_s` (one build at a time per laptop, RFC §9.1) | B | TBD (default 150 full / 45 demo) |
+| H6 | Laptops and builders | C | 4 laptops, one builder each (n = 4, f = 1). Builder id = operator = the laptop's hostname via `matrix up` (or `--name`). Addresses discovered by signed hellos; no fixed IPs. Laptop A is also the publisher (HLD §5.1) |
+| H7 | Venue network plan and fallback | C | Phone hotspot, plain LAN (UDP 7788, TCP 7700). tinc / WireGuard optional, for privacy only. Fallback: another phone or a travel router |
+| H8 | Release-signer keys | D | Every founder holds its own release key, `~/.matrix/keys/release.key` (genesis id `<name>-rel`), generated locally by `matrix up` and never copied |
+| H9 | Machine used for offline `matrix verify` in the demo | D | Any laptop with Wi-Fi off, or a judge's machine |
 
 ## 5. Contracts and parallel work
 
@@ -119,6 +119,8 @@ Everything here is deterministic, so tests from all tracks agree byte for byte.
 
 Pick the lowest-numbered task in your track whose dependencies have merged. "Accept" lists what must pass before the PR merges. Hours are targets from RFC §9.3.
 
+The track tables below are the original plan. RFC rev 5 (4 laptops, one builder each, `matrix up`, discovered addresses) adds tasks R1–R7 (§6.1) and supersedes C1's tinc requirement, C7 and X1–X2; those rows are marked.
+
 ### Track A: Core and protocol
 
 | ID | Task | Depends | Accept | Hours |
@@ -127,7 +129,7 @@ Pick the lowest-numbered task in your track whose dependencies have merged. "Acc
 | A2 | `canon`, `crypto`, golden vectors | A1 | `test_canon`, `test_crypto` incl. replay rejection | 0.5–1 |
 | A3 | `genesis`, `model` (request, recipe, ldflags, envelope, certificate) | A2 | `test_genesis`, `test_model` | 1–2.5 |
 | A4 | `select`, `verdict`, model check, fuzz | A3 | `test_select`, `test_verdict`, `test_verdict_modelcheck` (< 30 s), `test_fuzz` | 2.5–4 |
-| A5 | `protocol.Engine`: `on_request`, `on_attest`, admission, worker, attest (persist then broadcast) | A4, B2 (or FakeStore) | `test_protocol`: shed on 3rd request, persist-before-broadcast, idempotent submit, 409 unknown/expired | 4–6 |
+| A5 | `protocol.Engine`: `on_request`, `on_attest`, admission, worker, attest (persist then broadcast) | A4, B2 (or FakeStore) | `test_protocol`: extra requests queued in SQLite, never shed (LLD L30/L31), persist-before-broadcast, idempotent submit, 409 unknown/expired | 4–6 |
 | A6 | `sync_loop`, `recover`, `detect_evidence`, `is_settled` | A5 | `test_protocol`: restart re-sends without rebuild, EQUIVOCATION / DISAGREE / STALL, settled skip | 6–8 |
 | A7 | Support the integration fault matrix; fix protocol bugs found by C6 | C6 | RFC §9.1 integration rows pass | 8–10 |
 
@@ -135,7 +137,7 @@ Pick the lowest-numbered task in your track whose dependencies have merged. "Acc
 
 | ID | Task | Depends | Accept | Hours |
 |---|---|---|---|---|
-| B1 | Pin the Go image (H4), pre-pull on all laptops, build the sample repo on every laptop with 2 concurrent builds, record hash and time (H5) | B1s | Same hash on all 4 laptops; timings in the PR | 0–1 |
+| B1 | Pin the Go image (H4), pre-pull on all laptops, build the sample repo on every laptop, record hash and time (H5) | B1s | Same hash on all 4 laptops; timings in the PR | 0–1 |
 | B1s | Create the sample repo (§10) with all tags; write `examples/faults/backdoor.patch`; record the honest and backdoored hashes in §10 | — | Tags pushed; hashes recorded | 0–1 |
 | B2 | `store.py` (LLD §3.7) | A1 | `test_store` on `:memory:` and a temp file; `record_own_attestation` is one transaction | 1–2.5 |
 | B3 | `builder.py` steps 0–4, `docker_common`, `classify_go_build`, BAD_REF markers | A3 | `test_builder_classify`; `tests/integration/test_builder.py`: honest hash = B1 hash, broken tag → FAILED, missing recipe → BAD_RECIPE, wrong tag → BAD_REF | 2.5–5.5 |
@@ -146,32 +148,46 @@ Pick the lowest-numbered task in your track whose dependencies have merged. "Acc
 
 | ID | Task | Depends | Accept | Hours |
 |---|---|---|---|---|
-| C1 | tinc on all 4 laptops (RFC §7.13) or the fallback by hour 2; write `docs/OPS.md` | H6, H7 | All laptops ping each other's `10.77.0.x` | 0–2 |
+| C1 | Laptop network (H7) and `docs/OPS.md`. Rev 5: phone hotspot, plain LAN; tinc optional, not required | H6, H7 | All laptops ping each other on the hotspot; UDP 7788 and TCP 7700 open | 0–2 |
 | C2 | `scripts/dev_genesis.py` (LLD §12.1) | A3 | Output loads with `load_genesis`; `--addrs local` and `compose` both work | 1–2 |
 | C3 | `net.py`: all routes from `openapi.yaml`, body limits, error codes, `PeerClient` | A1 (FakeEngine) | `test_net` with `aiohttp` test client: every route, every status code in `openapi.yaml` | 2–5 |
 | C4 | `node.py`: flags, startup checks, wiring, signal handling | C3, A5 | 8 nodes start locally; `curl /v1/health` on each | 5–6 |
 | C5 | `faults.py` + `docker-compose.faults.yml` scenes | C4 | `test_faults`; refusing fault flags without `--allow-faults` | 6–7.5 |
 | C6 | `tests/integration/harness.py` (start/stop 8 local nodes with a temp data dir each) and `test_matrix.py` (RFC §9.1 fault matrix) | C5, B4, A6 | Fault matrix passes on one machine | 7.5–10 |
-| C7 | Real `genesis.json` and `genesis.demo.json`: each laptop runs `matrix keygen` locally, sends **only** the public key; C assembles, publishes the genesis hash in `docs/OPS.md` | C1, D1 | Every laptop's node starts with it | 8–9 |
+| C7 | **Superseded by R4 (rev 5).** Genesis comes from the `matrix up` ceremony on every laptop, not hand-assembled. C still publishes the resulting genesis hash and `genesis.json` for consumers in `docs/OPS.md` | R4 | The published hash equals `~/.matrix/genesis.sha256` on every laptop | 8–9 |
 
 ### Track D: Clients and demo
 
 | ID | Task | Depends | Accept | Hours |
 |---|---|---|---|---|
 | D1 | `cli` skeleton (`argparse`, exit codes), `keygen`, `verify` (offline) | A4 | `test_verify`: every RFC §6.4 verify row and every LLD §11 case | 1–4 |
-| D2 | `release` (sign, submit to 3 operators, poll, union, artifact download, certificate), `status`, `evidence` | D1, C3 (or a test server) | `test_cli` against an `aiohttp` test server: CERTIFIED, BUILD_FAILED, NOT_REPRODUCIBLE, PENDING timeout, corrupted artifact skipped | 4–6.5 |
+| D2 | `release` (sign, submit until f+1 distinct operators accepted, poll, union, artifact download, certificate), `status`, `evidence` | D1, C3 (or a test server) | `test_cli` against an `aiohttp` test server: CERTIFIED, BUILD_FAILED, NOT_REPRODUCIBLE, PENDING timeout, corrupted artifact skipped | 4–6.5 |
 | D3 | `tui.py`: Builders and Releases screens | D2 | Manual: shows a live compose network | 6–8 |
 | D4 | TUI Detail and Evidence screens | D3 | Manual: equivocation proof visible | 8–9.5 |
-| D5 | `docs/DEMO.md` (6 scenes, commands, expected output, reset, fallbacks) and `examples/ci/{publisher,consumer}.yml` | D2, B1s | A dry run of the demo following only `DEMO.md` | 9–10.5 |
+| D5 | `docs/DEMO.md` (7 scenes of RFC rev 5 §9.2, commands, expected output, reset, fallbacks) and `examples/ci/{publisher,consumer}.yml` | D2, B1s | A dry run of the demo following only `DEMO.md` | 9–10.5 |
 
 ### All tracks
 
 | ID | Task | Hours |
 |---|---|---|
-| X1 | End-to-end over tinc: certify, upload, verify on the offline machine | 10–11.5 |
-| X2 | Rehearse the demo twice with `genesis.demo.json` | 11.5–12 |
+| X1 | **Superseded by R7.** End-to-end over the hotspot: certify, upload, verify on the offline machine | 10–11.5 |
+| X2 | **Superseded by R7.** Rehearse the demo twice following only `DEMO.md` | 11.5–12 |
 
 Cut order if behind: RFC §9.4. **Never cut** the items listed there.
+
+### 6.1 Rev 5 backlog (4 laptops, `matrix up`, discovery)
+
+Spec: RFC rev 5 (founding ceremony, address discovery, demo), HLD §5.1 and §6.1–§6.2. Owner track in brackets. Static membership, the security core and every §13.2 invariant are unchanged.
+
+| ID | Task | Depends | Accept |
+|---|---|---|---|
+| R1 | [C] `matrix/discovery.py`: hello build / parse / verify (≤ 512 bytes, strict keys, signer in genesis, our genesis hash, `seq` strictly increasing, signature last), in-memory address book, UDP announcer and listener on 7788 (every 5 s, at start, on address change, unicast reply to a new or changed member), online window 15 s. Standard library only | A3 | `test_discovery`: valid hello accepted; stranger, forged, replayed, oversized and wrong-genesis hellos dropped without raising; online/offline by `last_seen` |
+| R2 | [C] `net.py`: `PeerClient` resolves addresses from the address book, else genesis `addr`, else unreachable; `GET /v1/peers`; `GET /v1/requests/{id}/log` loopback only (404 otherwise) | R1 | `test_net`: `/v1/peers` shape per `openapi.yaml`; log 404 for a non-loopback caller; address book wins over genesis `addr` |
+| R3 | [A] `genesis.py`: `addr` optional. [C] `node.py`: discovery task, `--advertise HOST:PORT`, `--no-discovery` (for the local harness) | R1 | `test_genesis`: genesis without `addr` loads, all other parse rules unchanged; the node starts with and without discovery |
+| R4 | [D] `cli.py`: `matrix up` (local keys under `~/.matrix/keys/`, `network.toml`, founder and endorse messages, seal checks, deterministic genesis, short code, unanimous endorsement, 5 min abort, `--refound`, fault flag pass-through, then start the node); address resolution via `/v1/peers` with every hello re-verified; default paths under `~/.matrix/` | R1, R2, R3 | `test_cli` with fake sockets: 4 founders give byte-identical genesis and short code; seal refused below 4 founders, duplicate ids or a `params_hash` mismatch; missing endorsement aborts and writes nothing; rogue founder only changes the short code |
+| R5 | [D] `tui.py`: Builders screen shows address, online/offline, last seen and genesis match from the local node's `/v1/peers`; log tail only for the local builder | R2 | Manual: 4 builders online on the hotspot; a laptop with Wi-Fi off turns offline in ~15 s |
+| R6 | [C] `network.toml`; `scripts/dev_genesis.py --nodes 4`; compose and fault files for n = 4; integration fault matrix for f = 1 | R3 | Integration: one faulty builder never certifies a wrong hash; 1 faulty + 1 offline certifies; 3 offline stays `PENDING` |
+| R7 | [all] 4-laptop end-to-end over the hotspot, then two rehearsals following only `DEMO.md` | R1–R6, D5 | All 7 demo scenes (§10) pass twice |
 
 ## 7. Git workflow
 
@@ -273,17 +289,23 @@ A separate public GitHub repo, `https://github.com/<org>/matrix-hello` (H3), bec
 go.mod            module github.com/<org>/matrix-hello   go 1.23   (no dependencies)
 cmd/hello/main.go prints "hello from matrix " + version; var version = "dev"
 matrix.toml       image "go1.23", package "./cmd/hello", goos "linux", goarch "amd64",
-                  ldflags "-s -w -buildid= -X main.version=v1.2.0" (per tag), output "hello"
+                  ldflags "-s -w -buildid= -X main.version=<tag>" (per tag), output "hello"
 ```
 
-| Tag | Purpose | Expected result |
+A tag can be released only once (`request_id` = hash of repo, commit and tag), so each demo scene uses its own tag. `v1.2.0`..`v1.2.5` have identical code; only the version in the `matrix.toml` ldflags differs, so each tag has its own hash.
+
+| Tag | Purpose (RFC rev 5 §9.2 scenes) | Expected result |
 |---|---|---|
-| `v1.2.0` | Demo scene 1 | `CERTIFIED`, hash `TBD` |
-| `v1.2.1` | Demo scenes 2, 3 | `CERTIFIED`, honest hash `TBD`; backdoored hash (with `backdoor.patch`) `TBD` |
+| (none) | Scene 1: zero-config founding with `matrix up`; scene 4: imposter on the hotspot | 4 builders online; rogue messages rejected |
+| `v1.2.0` | Scene 2: happy path | `CERTIFIED`, hash `TBD` |
+| `v1.2.1` | Scene 3: SolarWinds (`inject` on laptop C); scene 5: swapped download uses its backdoored binary, and an older tag's certificate | `CERTIFIED`, honest hash `TBD`; backdoored hash (with `backdoor.patch`) `TBD` |
+| `v1.2.2` | Scene 6: a laptop drops off | `CERTIFIED` with 3 of 4, hash `TBD` |
+| `v1.2.3` | Scene 7: caught cheater (`equivocate` on laptop B) | `CERTIFIED`, `EQUIVOCATION` evidence, hash `TBD` |
+| `v1.2.4`, `v1.2.5` | Spare tags for rehearsals and re-runs | `CERTIFIED`, hashes `TBD` |
 | `v0.9.0-broken` | Compile error | `BUILD_FAILED` (exit 5) |
 | `v0.9.1-norecipe` | No `matrix.toml` | stays `PENDING` (exit 3) |
 
-`examples/faults/backdoor.patch` is a `git apply` patch against `cmd/hello/main.go` in `v1.2.1` that adds a visible extra line, for example `fmt.Println("backdoor active")`. Record both hashes above as soon as B1 measures them; D5 and the collude scene need them.
+`examples/faults/backdoor.patch` is a `git apply` patch against `cmd/hello/main.go` that applies cleanly to every `v1.2.x` tag and adds a visible extra line, for example `fmt.Println("backdoor active")`. Record the honest hash of every tag (and the backdoored hash of `v1.2.1`) as soon as B1 measures them; D5 needs them.
 
 ## 11. Sync checkpoints
 
@@ -293,10 +315,10 @@ Short stand-up at each checkpoint. Anything red means re-plan with the RFC §9.4
 |---|---|
 | 0.5 | §4 table filled; A1 merged (skeleton, fakes, CI) |
 | 1 | Contracts frozen; A2 merged; image pinned; determinism on 4 laptops confirmed (B1) |
-| 2 | tinc (or fallback) up on all laptops; C2 merged |
+| 2 | All laptops reach each other on the phone hotspot (tinc optional); C2 merged |
 | 4 | A4 (verdict + model check) merged; B3 builds the sample repo; D1 `verify` works |
 | 6 | A5, C3, D2 merged; one builder certifies end to end in compose |
-| 8 | 8 builders certify in compose; faults land; real genesis assembled |
+| 8 | 8 builders certify in compose; faults land; the 4-laptop `matrix up` ceremony gives one genesis hash (R4) |
 | 10 | Fault matrix green; TUI complete; `DEMO.md` dry run done |
 | 11.5 | Feature freeze. Only demo fixes after this. |
 
@@ -334,7 +356,7 @@ Out of scope: anything not in this card
 ### 13.1 KISS
 
 1. **No new dependencies** beyond §8.1. Use the standard library for everything else (`sqlite3`, `tomllib`, `hashlib`, `json`, `argparse`, `logging`, `asyncio`).
-2. No frameworks or layers that the LLD does not name: no ORM, FastAPI, pydantic, DI container, plugin system or config files beyond genesis.
+2. No frameworks or layers that the LLD does not name: no ORM, FastAPI, pydantic, DI container, plugin system or config files beyond genesis and `network.toml`.
 3. Plain functions and frozen dataclasses. Use a class only when it holds state (`Store`, `Engine`, `PeerClient`, `Fault`).
 4. One module per file listed in LLD §1.
 5. No speculative features: no flags, options, retries, caches or abstractions that the spec does not ask for. Nothing from RFC §10.
@@ -346,7 +368,7 @@ These are the security of the system. A change that weakens one is wrong even if
 
 1. **Parsers and `verdict()` never raise** on any input. Hostile input → `None` / ignored.
 2. **Canonical JSON** (`canon.canonical_json`) for every hash and signature. No floats in signed data. Duplicate JSON keys are rejected.
-3. **Domain-separated signatures:** `b"matrix/v1\0" + genesis_hash + b"\0" + canonical_json(...)`. Never sign or verify raw bodies.
+3. **Domain-separated signatures:** `b"matrix/v1\0" + genesis_hash + b"\0" + canonical_json(...)`, hellos and endorsements included. Only ceremony founder messages, which exist before genesis, use `b"matrix/v1-founder\0" + network_id + b"\0"`. Never sign or verify raw bodies.
 4. **`verdict()` gets its request from the caller**, never from a bundle or peer. `verify` checks the request signature *and* the expected repo, tag and (optional) commit.
 5. **Count only** non-equivocating, selected, validly signed attestations for this exact `request_id`. Threshold is `f+1` from genesis.
 6. **`FAILED` is a vote only for a deterministic, rerun-confirmed compile error** (LLD §3.8). Every environmental problem is `ERROR` and **abstains**. `BAD_REF` and `BAD_RECIPE` abstain.
@@ -356,11 +378,11 @@ These are the security of the system. A change that weakens one is wrong even if
 10. **Never join user input onto a filesystem path.** Validate IDs and hashes with `re.fullmatch(..., re.ASCII)` first; look artifacts up in the DB.
 11. **Fail closed.** Only exit code 0 means success (RFC §6.4).
 12. Fault modes are inert unless the node was started with `--allow-faults`.
-13. **Private keys never leave the machine that generated them.** Only public keys go into genesis. Test seeds (§5.3) are for tests only.
+13. **Private keys never leave the machine that generated them** (`matrix up` creates them in `~/.matrix/keys/`). Only public keys go into genesis. Test seeds (§5.3) are for tests only.
 
 ### 13.3 Layering
 
-Imports only point downward (HLD §4): `canon, crypto, genesis` → `model, select, verdict` → `store, builder` → `protocol, net, faults` → `node, cli, tui`. The pure layers (bottom two) must not import `asyncio`, `aiohttp`, `sqlite3` or `subprocess`.
+Imports only point downward (HLD §4): `canon, crypto, genesis` → `model, select, verdict` → `store, builder` → `protocol, net, faults, discovery` → `node, cli, tui`. The pure layers (bottom two) must not import `asyncio`, `aiohttp`, `sqlite3` or `subprocess`.
 
 ### 13.4 Don'ts
 
@@ -368,6 +390,8 @@ Imports only point downward (HLD §4): `canon, crypto, genesis` → `model, sele
 - Don't let a builder auto-exclude peers, or change selection based on evidence.
 - Don't read the request from a bundle or certificate without verifying it against the caller's expectations.
 - Don't treat a timeout, OOM, Docker error, network error or `go mod download` failure as `FAILED`.
+- Don't let membership change on connect/disconnect; don't add gossip membership, a DHT, or any signing authority. Membership changes only by re-founding.
+- Don't put addresses into ceremony genesis or let anything security-relevant depend on an address. Addresses come from signed hellos and only locate members.
 - Don't add HTTP authentication, TLS or a web dashboard. Transport is untrusted by design; signatures carry the security.
 - Don't edit the RFC to match your code. If the RFC is wrong, report it.
 
@@ -377,20 +401,43 @@ Imports only point downward (HLD §4): `canon, crypto, genesis` → `model, sele
 Matrix_RFC_001.md                       spec (humans only)
 AGENTS.md                               this file
 docs/HLD.md docs/LLD.md docs/openapi.yaml
-docs/OPS.md docs/DEMO.md                to write (C1, D5)
+docs/OPS.md docs/DEMO.md                per-laptop setup, demo runbook (C1, D5)
 matrix/                                 the package (LLD §1, §3)
+matrix/discovery.py                     signed UDP hellos, address book, ceremony messages (R1)
+network.toml                            network params for the `matrix up` ceremony (R6)
 tests/conftest.py tests/fakes.py tests/vectors/     shared test kit (A)
 tests/test_*.py                         unit tests
 tests/integration/                      Docker + network tests
 scripts/dev_genesis.py                  dev keys + genesis (C2)
 examples/faults/backdoor.patch          inject demo (B1s)
 examples/ci/                            publisher/consumer CI (D5)
-genesis.json genesis.demo.json          real network (C7)
+genesis.json genesis.demo.json          published copy of the ceremony genesis for consumers (C7)
 Dockerfile docker-compose.yml docker-compose.faults.yml .env.example
 .github/workflows/ci.yml                CI (A1)
 ```
 
-## 15. Run it (single machine)
+## 15. Run it
+
+### 15.1 Four laptops (demo and default)
+
+Once per laptop, follow [docs/OPS.md](docs/OPS.md): WSL2 with mirrored networking on Windows, firewall open for UDP 7788 and TCP 7700, Docker, the same repo checkout (same `network.toml`), all laptops on the phone hotspot.
+
+```bash
+python3.11 -m venv .venv && . .venv/bin/activate && pip install -e .
+docker pull --platform linux/amd64 golang@sha256:<digest>
+matrix up                     # on every laptop: founders appear, Enter to seal,
+                              # read the short code aloud, confirm with y; the builder then runs
+# laptop A (publisher): matrix tui in a second terminal, then in a third:
+matrix release --repo https://github.com/<org>/matrix-hello --tag v1.2.0 --commit <sha> \
+  --wait 600 --out dist/      # key ~/.matrix/keys/release.key, addresses from the local node
+# any machine with Wi-Fi off, using the published genesis.json and pin:
+matrix verify dist/hello --cert dist/hello.matrix.json \
+  --repo https://github.com/<org>/matrix-hello --tag v1.2.0
+```
+
+Later runs of `matrix up` reuse `~/.matrix/genesis.json` and skip the ceremony. Demo faults: restart one laptop's node with `matrix up --allow-faults --fault MODE [--patch FILE] [--hash HEX]`. Never more than one faulty builder at a time (f = 1).
+
+### 15.2 Single machine (development)
 
 ```bash
 cp .env.example .env                         # set MATRIX_DATA (absolute), UIDs, DOCKER_GID
@@ -407,4 +454,4 @@ docker compose run --rm cli tui
 
 Without Docker Compose: `python scripts/dev_genesis.py --addrs local ...` and start 8 `matrix-node` processes on `127.0.0.1:7700–7707` (or use `tests/integration/harness.py` from C6).
 
-Demo faults: edit [docker-compose.faults.yml](docker-compose.faults.yml), then `docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builderN`. Never more than 2 malicious builders at once.
+Demo faults: edit [docker-compose.faults.yml](docker-compose.faults.yml), then `docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builderN`. Never more than f malicious builders at once (2 in the 8-builder compose network; 1 with `dev_genesis.py --nodes 4`).

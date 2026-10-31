@@ -3,30 +3,39 @@ info:
   title: Matrix builder API
   version: 1.0.0
   description: |
-    HTTP API served by every Matrix builder (`matrix-node`). See RFC-0001 rev 4 §7.9
-    and docs/LLD.md §3.10.
+    HTTP API served by every Matrix builder (`matrix-node`). See RFC-0001 rev 5 §7.9
+    and docs/LLD.md §3.10, §3.10a.
 
     - Every builder serves the same API. There is no central server.
-    - Bound to the builder's mesh IP only (tinc). There is no HTTP authentication:
-      integrity comes from Ed25519 signatures inside the envelopes, which every
-      receiver re-verifies. Treat every response as untrusted.
+    - Reached at the builder's LAN address (plain LAN by default; tinc or WireGuard are
+      optional, for privacy only). Addresses are not in genesis: each builder announces
+      `<IPv4>:<port>` in signed UDP hellos (port 7788, docs/LLD.md §4.3), and clients
+      learn them from `GET /v1/peers` and re-verify every hello against genesis.
+    - There is no HTTP authentication: integrity comes from Ed25519 signatures inside
+      the envelopes, which every receiver re-verifies. Treat every response as untrusted.
+      Requests, attestations and evidence are public on purpose so anyone can recount the
+      votes; only build logs are restricted (loopback callers).
     - All JSON is UTF-8. Signed objects are compared and hashed in canonical JSON
       (sorted keys, separators "," and ":", no floats).
 servers:
   - url: http://{host}:{port}
     variables:
       host:
-        default: 10.77.0.1
-        description: Builder mesh IP (tinc) or compose service name (builder1..builder8)
+        default: 127.0.0.1
+        description: |
+          Builder LAN IP, discovered via signed hellos (GET /v1/peers); 127.0.0.1 for the
+          laptop's own builder; a static genesis addr or compose service name
+          (builder1..builder8) in development
       port:
         default: "7700"
-        description: 7700 + k for the k-th builder on a laptop
+        description: 7700 with `matrix up`; 7700 + k for the k-th local dev builder
 
 tags:
   - name: requests
   - name: attestations
   - name: artifacts
   - name: ops
+  - name: discovery
 
 paths:
   /v1/health:
@@ -116,6 +125,10 @@ paths:
     get:
       tags: [ops]
       summary: Last 64 KiB of this builder's own build log for the request
+      description: |
+        Served only to loopback callers (127.0.0.1, ::1). Any other caller gets 404
+        `not_found`, whether or not the log exists: logs reveal host details (paths,
+        uids, toolchain output) and stay on their own laptop.
       operationId: getLog
       parameters:
         - $ref: "#/components/parameters/RequestId"
@@ -125,7 +138,29 @@ paths:
           content:
             text/plain:
               schema: { type: string, maxLength: 65536 }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "404":
+          description: Not found (`not_found`), or the caller is not on loopback
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/peers:
+    get:
+      tags: [discovery]
+      summary: Latest accepted hello per node, as seen by this builder
+      description: |
+        Untrusted: clients re-verify every hello against their own genesis (signer is a
+        genesis node, genesis_hash matches, signature valid) before using its address,
+        and keep the highest seq per signer. Includes this builder's own latest hello.
+        Empty list when the builder runs with `--no-discovery`. A client counts a node
+        as online if `now - seq / 1000 < 15` (docs/LLD.md L41).
+      operationId: listPeers
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PeerList" }
 
   /v1/messages:
     post:
@@ -312,7 +347,7 @@ components:
         node_id: { $ref: "#/components/schemas/Id" }
         version: { type: string, examples: ["0.1.0"] }
         genesis_hash: { $ref: "#/components/schemas/Hex64" }
-        now: { type: number, description: Builder clock, unix seconds }
+        now: { type: number, description: "Builder clock, unix seconds" }
 
     RequestAccepted:
       type: object
@@ -376,6 +411,46 @@ components:
             - type: array
               items: { $ref: "#/components/schemas/AttestEnvelope" }
         created_at: { type: number }
+
+    HelloBody:
+      type: object
+      additionalProperties: false
+      required: [genesis_hash, addr, seq]
+      properties:
+        genesis_hash: { $ref: "#/components/schemas/Hex64" }
+        addr:
+          type: string
+          pattern: "^[0-9]{1,3}(\\.[0-9]{1,3}){3}:[0-9]{1,5}$"
+          description: Advertised HTTP address `<IPv4>:<port>` (octets ≤ 255, port 1–65535)
+          examples: ["172.20.10.3:7700"]
+        seq:
+          type: integer
+          minimum: 0
+          description: Sender's unix time in ms; strictly increasing per signer (anti-replay)
+
+    HelloEnvelope:
+      type: object
+      additionalProperties: false
+      required: [v, type, signer, body, sig]
+      description: |
+        Signed by a genesis builder. Canonical JSON size ≤ 512 bytes. Broadcast on UDP
+        255.255.255.255:7788 every 5 s; served here as last received.
+      properties:
+        v: { type: integer, const: 1 }
+        type: { type: string, const: hello }
+        signer: { $ref: "#/components/schemas/Id" }
+        body: { $ref: "#/components/schemas/HelloBody" }
+        sig: { $ref: "#/components/schemas/Sig" }
+
+    PeerList:
+      type: object
+      required: [now, hellos]
+      properties:
+        now: { type: number, description: "This builder's clock, unix seconds" }
+        hellos:
+          type: array
+          description: At most one per genesis node, sorted by signer
+          items: { $ref: "#/components/schemas/HelloEnvelope" }
 
     EvidenceList:
       type: object

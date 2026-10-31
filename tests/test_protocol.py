@@ -101,7 +101,7 @@ async def test_new_request_is_stored_forwarded_and_queued(make_rig):
     rid = await rig.submit()
     assert rig.phase(rid) == "RECEIVED"
     assert rig.peers.requests_sent == [rig.release()]
-    assert rig.engine.queue.get_nowait() == rid
+    assert rig.engine.queued() == [rid]
     assert rig.fault.new_requests == 1
 
 
@@ -109,7 +109,7 @@ async def test_submit_is_idempotent(make_rig):
     rig = make_rig()
     rid = await rig.submit()
     assert await rig.submit() == rid
-    assert len(rig.peers.requests_sent) == 1 and rig.engine.queue.qsize() == 1
+    assert len(rig.peers.requests_sent) == 1 and rig.engine.queued() == [rid]
     assert rig.fault.new_requests == 1
 
 
@@ -120,7 +120,7 @@ async def test_unselected_builder_only_observes(genesis_dict, make_rig, genesis)
     out = next(n.id for n in g.nodes if n.id not in selected(rid, g.nodes, 5))
     rig = make_rig(g=g, me=out)
     assert await rig.submit() == rid
-    assert rig.phase(rid) == "OBSERVING" and rig.engine.queue.empty()
+    assert rig.phase(rid) == "OBSERVING" and rig.engine.queued() == []
     assert len(rig.peers.requests_sent) == 1  # still forwards
 
 
@@ -166,20 +166,33 @@ async def test_ingest_cap_is_20_per_minute(make_rig, clock):
 # --- build worker --------------------------------------------------------------------------
 
 
-async def test_third_request_is_shed(make_rig):
+async def test_requests_arriving_during_a_build_are_queued_in_order_not_shed(make_rig):
     gate = asyncio.Event()
     rig = make_rig(gate=gate)
     rig.start_worker()
     r1 = await rig.submit("v1")
     await rig.builder.started.wait()  # worker holds r1
-    r2 = await rig.submit("v2")  # queued
-    r3 = await rig.submit("v3")  # queue full
-    assert rig.phase(r3) == "SHED"
+    later = [await rig.submit(f"v{i}") for i in (2, 3, 4)]
+    assert rig.engine.queued() == later  # persisted in the store, oldest first
     gate.set()
-    await until(lambda: rig.phase(r1) == rig.phase(r2) == "ATTESTED")
-    assert rig.phase(r3) == "SHED"
-    assert [c[0] for c in rig.builder.calls] == [r1, r2]
-    assert rig.store.attestation_count(r3, "builder1") == 0
+    await until(lambda: all(rig.phase(r) == "ATTESTED" for r in [r1, *later]))
+    assert [c[0] for c in rig.builder.calls] == [r1, *later]
+
+
+async def test_queued_request_settled_by_peers_is_not_built(make_rig):
+    gate = asyncio.Event()
+    rig = make_rig(gate=gate)
+    rig.start_worker()
+    r1 = await rig.submit("v1")
+    await rig.builder.started.wait()
+    r2 = await rig.submit("v2")
+    # while r2 waits, three other builders agree on it; the worker fetches their votes first
+    votes = [rig.attest(f"builder{i}", H1, r2) for i in (2, 3, 4)]
+    rig.peers.responses = {"builder2": {f"/v1/requests/{r2}/bundle": {"envelopes": votes}}}
+    gate.set()
+    await until(lambda: rig.phase(r2) == "MISSED")
+    assert [c[0] for c in rig.builder.calls] == [r1]
+    assert rig.store.get_build(r2)["error"] == "settled" and rig.engine.is_settled(r2)
 
 
 async def test_attestation_is_persisted_before_it_is_broadcast(make_rig):
@@ -281,9 +294,9 @@ async def test_stall_never_attests(make_rig):
     rig = make_rig(fault=FakeFault(mode="stall"))
     rig.start_worker()
     rid = await rig.submit()
-    await until(lambda: rig.engine.queue.empty())
+    await until(lambda: rig.phase(rid) == "BUILDING")  # looks stuck; leaves the queue
     await asyncio.sleep(0)
-    assert rig.phase(rid) == "RECEIVED" and rig.builder.calls == [] and not rig.peers.attests_sent
+    assert rig.engine.queued() == [] and rig.builder.calls == [] and not rig.peers.attests_sent
 
 
 async def test_attest_never_signs_two_results(make_rig):
@@ -419,13 +432,13 @@ async def test_restart_resends_stored_attestation_without_rebuilding(make_rig):
     rig.start_engine()  # restart
     await rig.engine.recover()
     assert [e for e, only in rig.peers.attests_sent] == stored
-    assert rig.engine.queue.empty()
+    assert rig.engine.queued() == []
     rig.start_worker()
     await asyncio.sleep(0)
     assert rig.builder.calls == []  # never rebuilds an attested request
 
 
-async def test_restart_requeues_unattested_requests_and_sheds_overflow(make_rig):
+async def test_restart_resumes_the_persisted_queue(make_rig):
     rig = make_rig(gate=asyncio.Event())  # builds hang: simulates a crash mid-build
     rig.start_worker()
     r1 = await rig.submit("v1")
@@ -437,8 +450,10 @@ async def test_restart_requeues_unattested_requests_and_sheds_overflow(make_rig)
 
     rig.start_engine()
     await rig.engine.recover()
-    assert rig.phase(r1) == "RECEIVED" and rig.engine.queue.get_nowait() == r1
-    assert rig.phase(r2) == "SHED"  # one queue slot; the other request is shed
+    assert rig.engine.queued() == [r1, r2]  # the interrupted build first; nothing is shed
+    rig.start_worker()
+    await until(lambda: rig.phase(r1) == rig.phase(r2) == "ATTESTED")
+    assert [c[0] for c in rig.builder.calls] == [r1, r2]
 
 
 async def test_recover_leaves_other_requests_alone(make_rig, clock):
@@ -454,7 +469,7 @@ async def test_recover_leaves_other_requests_alone(make_rig, clock):
 
     rig.start_engine()
     await rig.engine.recover()
-    assert rig.engine.queue.empty()
+    assert rig.engine.queued() == []
     assert [rig.phase(r) for r in (missed, old, fresh)] == ["MISSED", "MISSED", "OBSERVING"]
 
 
@@ -641,3 +656,25 @@ async def test_sync_flags_stalled_builders_and_expires_artifacts_hourly(
     clock.advance(3600)
     await until(lambda: len(expired) == 2)
     assert rig.store.get_request(rid) is not None
+
+
+async def test_returning_peer_adopts_consensus_without_rebuilding(make_rig, fast_sleep):
+    # builder1 was offline while a release settled; on return it syncs and recounts the votes
+    rig = make_rig()
+    release = rig.release()
+    rid = request_id(release["body"])
+    votes = [rig.attest(f"builder{i}", H1, rid) for i in (2, 3, 4)]
+    bundle = {"request": release, "envelopes": votes}
+    rig.peers.responses = {
+        "builder2": {
+            "/v1/requests?since=0.0": listing(1000.0, (rid, 990.0)),
+            f"/v1/requests/{rid}": {"request": release, "phase": "ATTESTED", "received_at": 990.0},
+            f"/v1/requests/{rid}/bundle": bundle,
+        }
+    }
+    rig.start_worker()
+    start_sync(rig)
+    await until(lambda: rig.store.get_request(rid) is not None and rig.phase(rid) == "MISSED")
+    assert rig.builder.calls == []  # never rebuilt
+    assert rig.store.get_build(rid)["error"] == "settled"
+    assert [rig.store.attestation_count(rid, f"builder{i}") for i in (2, 3, 4)] == [1, 1, 1]

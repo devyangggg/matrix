@@ -1,6 +1,7 @@
 """Untrusted HTTP transport for builders and peer messages."""
 
 import asyncio
+import ipaddress
 import json
 import math
 import re
@@ -37,6 +38,16 @@ def _since(request: web.Request) -> float:
         return value if 0 <= value < float("inf") else 0.0
     except ValueError:
         return 0.0
+
+
+def _is_loopback(remote: str | None) -> bool:
+    """True only for a caller on this machine (127.0.0.0/8, ::1, IPv4-mapped loopback)."""
+    try:
+        ip = ipaddress.ip_address(remote or "")
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return (mapped or ip).is_loopback
 
 
 def _row_envelope(row: Any) -> dict:
@@ -113,6 +124,10 @@ def make_app(engine: Any, store: Any, g: Any, me: Any, env: Any) -> web.Applicat
         )
 
     async def log(request: web.Request) -> web.Response:
+        # Build logs reveal host details (paths, uid/gid, docker args, toolchain output), so they
+        # stay on their own laptop (RFC rev 5 §7.9). Checked first: peers cannot even probe ids.
+        if not _is_loopback(request.remote):
+            return _error("not_found", 404)
         row = lookup(request)
         if row is None:
             return _error("not_found", 404)

@@ -285,12 +285,28 @@ def test_no_builder_accepts(net):
     assert net.release() == 4
 
 
-def test_one_acceptance_is_enough(net):
-    for nid in ("builder3", "builder5"):
-        net.node(nid).accept = 400
+def test_unreachable_operator_falls_back_to_the_next_one(net):
+    # builder3 (laptopB) refuses; builder1 alone may be faulty and drop the request, so release
+    # keeps going until f+1 = 3 distinct operators accepted
+    net.node("builder3").accept = 503
     net.attest(dict.fromkeys(ALL, H))
     net.serve("builder1")
     assert net.release() == 0
+    assert [nid for nid in ALL if net.node(nid).posted] == [
+        "builder1",
+        "builder3",
+        "builder5",
+        "builder7",
+    ]
+
+
+def test_fewer_than_f_plus_1_operators_accept_is_an_error(net):
+    for nid in ("builder3", "builder5"):
+        net.node(nid).accept = 400  # only laptopA and laptopD accept: 2 < f+1 = 3
+    net.attest(dict.fromkeys(ALL, H))
+    net.serve("builder1")
+    assert net.release() == 4
+    assert not (net.tmp / "dist").exists()
 
 
 def test_key_not_a_release_signer(net):

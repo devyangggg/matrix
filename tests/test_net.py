@@ -9,7 +9,7 @@ import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from matrix.net import PeerClient, make_app
+from matrix.net import PeerClient, _is_loopback, make_app
 from matrix.node import _fault, _parser, main
 
 RID = "a" * 64
@@ -284,3 +284,39 @@ def test_node_rejects_incomplete_or_incompatible_fault_flags(fault_args):
     )
     with pytest.raises(ValueError):
         _fault(args)
+
+
+@pytest.mark.parametrize(
+    "remote, ok",
+    [
+        ("127.0.0.1", True),
+        ("127.8.9.1", True),
+        ("::1", True),
+        ("::ffff:127.0.0.1", True),
+        ("192.168.43.17", False),
+        ("10.77.0.2", False),
+        ("::ffff:192.168.43.17", False),
+        ("fe80::1", False),
+        ("", False),
+        (None, False),
+        ("not-an-ip", False),
+    ],
+)
+def test_is_loopback(remote, ok):
+    assert _is_loopback(remote) is ok
+
+
+@pytest.mark.asyncio
+async def test_log_is_never_served_to_another_machine(api, monkeypatch):
+    client, _, _, tmp = api
+    log = tmp / "logs" / f"{RID}.log"
+    log.parent.mkdir()
+    log.write_bytes(b"/home/builder/matrix-data uid=1000 secret host details")
+    assert (await client.get(f"/v1/requests/{RID}/log")).status == 200  # own laptop
+    # a peer builder or any device on the hotspot
+    monkeypatch.setattr(web.BaseRequest, "remote", property(lambda self: "192.168.43.17"))
+    response = await client.get(f"/v1/requests/{RID}/log")
+    assert (response.status, (await response.json())["error"]) == (404, "not_found")
+    assert b"secret" not in await response.read()
+    # the votes stay public: anyone must be able to recount them
+    assert (await client.get(f"/v1/requests/{RID}/bundle")).status == 200
