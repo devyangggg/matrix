@@ -3,6 +3,7 @@
 Needs Docker and the pinned image already pulled:
     MATRIX_TEST_IMAGE=golang@sha256:<linux/amd64 digest> pytest -q -m integration tests/integration/test_builder.py
 No network is needed for the repo (a local `file://` clone) or for dependencies (there are none).
+Under gVisor (the daemon must have `runsc` registered): MATRIX_TEST_RUNTIME=runsc.
 """
 
 import asyncio
@@ -75,7 +76,8 @@ def make_repo(tmp_path, *, main=MAIN, recipe: str | None = RECIPE, tag="v1.2.0")
 def env_in(tmp_path, name="data"):
     d = tmp_path / name
     d.mkdir(exist_ok=True)
-    return BuildEnv(str(d), "builder1", os.getuid(), os.getgid())
+    runtime = os.environ.get("MATRIX_TEST_RUNTIME") or None
+    return BuildEnv(str(d), "builder1", os.getuid(), os.getgid(), runtime)
 
 
 def sh(*argv, check=False) -> str:
