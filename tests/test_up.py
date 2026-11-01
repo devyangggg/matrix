@@ -1,5 +1,6 @@
 """`matrix up`: the founding ceremony over an in-memory bus, and the up command (RFC rev 5 §7.16)."""
 
+import argparse
 import asyncio
 import os
 import stat
@@ -18,8 +19,10 @@ from matrix.genesis import parse_genesis
 class FakeNode:
     def __init__(self):
         self.stop = asyncio.Event()
+        self.runs = 0
 
     async def run(self, args):
+        self.runs += 1
         await self.stop.wait()
 
 
@@ -31,8 +34,9 @@ def fake_tui(monkeypatch):
     apps = []
 
     class FakeApp:
-        def __init__(self, g, local, home=None):
+        def __init__(self, g, local, home=None, on_reset=None):
             self.quit = asyncio.Event()
+            self.on_reset = on_reset
             apps.append(self)
 
         async def run_async(self):
@@ -534,8 +538,21 @@ def test_up_rejects_bad_flags_before_anything(home, capsys, argv, message):
 def test_up_needs_network_toml(home, monkeypatch, tmp_path, capsys):
     h, _ = home
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_CHECKOUT", tmp_path)  # no network.toml there either
     assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
     assert "network.toml" in capsys.readouterr().err
+
+
+def test_up_uses_the_checkouts_network_toml_from_any_directory(home, monkeypatch, tmp_path, capsys):
+    h, _ = home
+    checkout, elsewhere = tmp_path / "checkout", tmp_path / "elsewhere"
+    checkout.mkdir()
+    elsewhere.mkdir()
+    (checkout / "network.toml").write_text(TOML)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(cli, "_CHECKOUT", checkout)
+    cli.run(["up", "--home", str(h), "--name", "laptop-a"])
+    assert "cannot read network.toml" not in capsys.readouterr().err
 
 
 def test_up_checks_docker_before_the_ceremony(home, monkeypatch):
@@ -668,3 +685,21 @@ async def test_a_stray_enter_is_not_an_answer_to_the_confirmation():
     # even without drain: the blank line is asked again, it neither confirms nor withdraws
     results = await _found_with_double_enter(drain_a=False)
     assert all(r is not None for r in results)
+
+
+async def test_reset_wipes_the_data_dir_and_restarts_the_builder(fake_tui, tmp_path):
+    data = tmp_path / "data"
+    (data / "logs").mkdir(parents=True)
+    (data / "matrix.db").write_text("attestations")
+    args = argparse.Namespace(data=str(data))
+    node = FakeNode()
+    task = asyncio.create_task(cli._node_and_tui(node, args, None, "127.0.0.1:7700"))
+    await asyncio.sleep(0.05)
+    message = await fake_tui[0].on_reset()
+    await asyncio.sleep(0.15)
+    assert not data.exists() and node.runs == 2
+    assert "sync them back" in message
+    assert not task.done()  # the old builder ending did not close the dashboard
+    assert not fake_tui[0].quit.is_set()
+    node.stop.set()
+    await asyncio.wait_for(task, 1)

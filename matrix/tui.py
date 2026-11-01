@@ -505,6 +505,7 @@ class MatrixTui(App):
         Binding("n", "release", "New release"),
         Binding("v", "verify", "Verify"),
         Binding("k", "keygen", "Keygen"),
+        Binding("x", "reset", "Reset"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -516,6 +517,7 @@ class MatrixTui(App):
         local_id: str | None = None,
         book: ClientBook | None = None,
         home: str = "~/.matrix",  # keys and genesis of this laptop (`matrix up --home`)
+        on_reset=None,  # async () -> str, set when the builder runs in this process
     ):
         super().__init__()
         self.g, self.local = g, local
@@ -533,6 +535,7 @@ class MatrixTui(App):
         self._busy = False
         self._job: str | None = None  # one form job at a time: output capture is process-wide
         self.home = os.path.expanduser(home)
+        self.on_reset = on_reset
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dashboard"):
@@ -698,6 +701,36 @@ class MatrixTui(App):
                 return f.read().strip()
         except OSError:
             return None  # cmd_verify then says there is no pinned hash
+
+    def action_reset(self) -> None:
+        if self.on_reset is None:
+            self.notify(
+                "reset needs the dashboard that `matrix up` opens: it restarts the builder",
+                severity="warning",
+            )
+            return
+        self._form(
+            "reset this laptop's builder",
+            [
+                (
+                    "confirm",
+                    (
+                        "type RESET to delete this laptop's requests, attestations, logs and "
+                        "artifacts (keys and genesis stay; peers still hold copies)"
+                    ),
+                    "",
+                )
+            ],
+            {"confirm"},
+            self._job_reset,
+        )
+
+    async def _job_reset(self, v: dict[str, str]) -> int:
+        if v["confirm"] != "RESET":
+            print("matrix: not confirmed (type RESET): nothing deleted", file=sys.stderr)
+            return EXIT_ERROR
+        print(await self.on_reset())
+        return 0
 
     def action_keygen(self) -> None:
         self._form(

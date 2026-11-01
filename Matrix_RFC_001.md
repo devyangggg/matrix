@@ -756,6 +756,7 @@ matrix verify hello --cert hello.matrix.json \
 | **Release form** | Every `matrix release` option as a field (repo, tag, commit, key, wait, out, output); runs the same code, then shows its output and exit code. The Releases screen shows it live | `n` |
 | **Verify form** | Every `matrix verify` option as a field; offline; shows the result and exit code | `v` |
 | **Keygen form** | `matrix keygen --out`; shows the public key | `k` |
+| **Reset** | Type `RESET` to stop this laptop's builder, delete its data dir (requests, attestations, logs, artifacts; keys and genesis stay) and start it again. Only in the dashboard that `matrix up` opens. Peers keep their copies and sync them back unless every laptop resets | `x` |
 
 The TUI polls the local builder's API every second, including `/v1/peers` for the Builders screen, and verifies every hello against genesis before showing it. It reads no database and holds no state of its own. The forms start the same functions as the CLI (G7) and keep no state either; one runs at a time. `status` and `evidence` are the Detail and Evidence screens; `up` options change the builder process and stay on the command line.
 

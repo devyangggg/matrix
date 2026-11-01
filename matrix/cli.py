@@ -9,6 +9,7 @@ import os
 import random
 import re
 import select
+import shutil
 import sys
 import threading
 import time
@@ -60,6 +61,9 @@ from .verdict import Verdict, verdict
 log = logging.getLogger(__name__)
 
 RELEASE_POLL_S = 2
+_CHECKOUT = (
+    Path(__file__).resolve().parent.parent
+)  # the repo this package runs from (uv sync is editable)
 
 EXIT_OK = 0
 EXIT_MISMATCH = 1  # verify
@@ -1147,9 +1151,14 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
             return EXIT_ERROR
     else:
         log.info("up: no founded network (or --refound): running the founding ceremony")
+        # ./network.toml wins (a deliberately different network); else the checkout this
+        # `matrix` was installed from, so `matrix up` works from any directory.
+        path = Path("network.toml")
+        if not path.exists():
+            path = _CHECKOUT / "network.toml"
         try:
-            params = load_network("network.toml")
-            log.info("network.toml loaded: %s", params)
+            params = load_network(str(path))
+            log.info("network.toml loaded from %s: %s", path.resolve(), params)
         except NetworkError as e:
             _err(f"{e} (run `matrix up` from the repo checkout)")
             return EXIT_ERROR
@@ -1279,22 +1288,59 @@ async def _node_and_tui(
     node: Any, args: argparse.Namespace, g: Genesis, local: str, home: str = "~/.matrix"
 ) -> None:
     """Run the builder and the dashboard side by side on one terminal. If the builder stops the
-    dashboard closes; if the user quits the dashboard the builder keeps running in the foreground."""
+    dashboard closes; if the user quits the dashboard the builder keeps running in the foreground.
+    The dashboard's reset key stops the builder, wipes its data dir and starts it again."""
     from .tui import MatrixTui, play_intro
 
-    node_task = asyncio.create_task(node.run(args))
-    await _wait_listening(local, node_task)
-    if node_task.done():
-        node_task.result()  # it stopped before listening: raise why
+    state = {"task": asyncio.create_task(node.run(args)), "resetting": False}
+    await _wait_listening(local, state["task"])
+    if state["task"].done():
+        state["task"].result()  # it stopped before listening: raise why
         return
     play_intro()
-    app = MatrixTui(g, local, home=home)
+
+    async def reset() -> str:
+        """Delete requests, attestations, logs and artifacts of this laptop (keys and genesis
+        stay), then start the builder again. Peers keep their copies and sync them back."""
+        state["resetting"] = True
+        failure: OSError | None = None
+        try:
+            old = state["task"]
+            old.cancel()
+            await asyncio.gather(old, return_exceptions=True)
+            try:
+                shutil.rmtree(args.data)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                failure = e  # the builder is restarted below either way
+            state["task"] = asyncio.create_task(node.run(args))
+            await _wait_listening(local, state["task"])
+            if state["task"].done():
+                state["task"].result()
+        finally:
+            state["resetting"] = False
+        if failure is not None:
+            raise failure
+        log.info("reset: %s wiped, builder restarted", args.data)
+        return (
+            f"Deleted {args.data} and restarted the builder.\n"
+            "Peers still hold their copies and will sync them back within seconds, "
+            "unless every laptop resets at the same time."
+        )
+
+    app = MatrixTui(g, local, home=home, on_reset=reset)
     tui_task = asyncio.create_task(app.run_async())
-    done, _ = await asyncio.wait({node_task, tui_task}, return_when=asyncio.FIRST_COMPLETED)
-    if node_task in done:
+    while True:
+        done, _ = await asyncio.wait({state["task"], tui_task}, return_when=asyncio.FIRST_COMPLETED)
+        if tui_task in done:
+            break
+        if state["resetting"]:
+            await asyncio.sleep(0.1)  # the old builder task ends by design
+            continue
         app.exit()
         await asyncio.gather(tui_task, return_exceptions=True)
-        node_task.result()  # raises the builder's error, if any
+        state["task"].result()  # raises the builder's error, if any
         return
     try:
         tui_task.result()
@@ -1303,7 +1349,7 @@ async def _node_and_tui(
     _out(
         "Dashboard closed; the builder keeps running here (Ctrl-C to stop; `matrix tui` reopens it)."
     )
-    await node_task
+    await state["task"]
 
 
 # entry point
@@ -1408,7 +1454,8 @@ def _parser() -> argparse.ArgumentParser:
         "Start this laptop's builder. On the first run (no ~/.matrix/genesis.json) it first runs\n"
         "the founding ceremony with the other laptops on the LAN: founders appear by UDP\n"
         "broadcast, Enter seals, everyone compares the short code aloud and confirms with y.\n"
-        "Run it from the repo checkout: the network parameters come from ./network.toml.\n"
+        "Run it from the repo checkout, or any directory: the network parameters come from\n"
+        "./network.toml if present, else from the checkout's network.toml.\n"
         "Ctrl-C stops the builder.",
         "  matrix up --name laptop-a     # first run: ceremony, then the builder\n"
         "  matrix up                     # later runs: no ceremony\n"
@@ -1516,7 +1563,8 @@ def _parser() -> argparse.ArgumentParser:
         "live dashboard: builders, releases and evidence",
         "Full-screen live view of the network through this laptop's builder. Keys: b builders,\n"
         "r releases, Enter detail, l log (this laptop's builder only), e evidence, n new release,\n"
-        "v verify, k keygen (forms that run `matrix release`, `verify` and `keygen`), q quit.",
+        "v verify, k keygen (forms that run `matrix release`, `verify` and `keygen`),\n"
+        "x reset this laptop's builder data (only in the dashboard `matrix up` opens), q quit.",
         "  matrix tui",
         "0 on quit, 4 error",
     )

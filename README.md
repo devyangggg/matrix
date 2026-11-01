@@ -132,7 +132,8 @@ reproducible, `3` pending, `4` error, `5` build failed.
 
 TUI keys: `b` builders, `r` releases, `Enter` detail, `l` log (this laptop only), `e` evidence,
 `n` new release, `v` verify, `k` keygen (forms that run the same code as `matrix release`,
-`verify` and `keygen`), `q` quit.
+`verify` and `keygen`), `x` reset this laptop's builder data (only in the dashboard
+`matrix up` opens: it restarts the builder; peers keep their copies), `q` quit.
 
 ## Demo scenes
 

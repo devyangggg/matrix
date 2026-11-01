@@ -420,3 +420,37 @@ async def test_keygen_form_writes_a_private_key_and_shows_the_public_one(peers, 
         shown = str(app.screen.query_one("#result-text", Static).render())
         assert len(shown) == 64 and set(shown) <= set("0123456789abcdef")
         assert (out.stat().st_mode & 0o777) == 0o600
+
+
+async def test_reset_needs_the_typed_confirmation(peers, genesis):
+    from matrix import tui
+
+    calls = []
+
+    async def reset():
+        calls.append(1)
+        return "wiped"
+
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1", on_reset=reset)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("x")
+        await _fill(app, pilot, confirm="yes")  # not RESET
+        await pilot.pause(0.2)
+        assert calls == [] and "nothing deleted" in str(
+            app.screen.query_one("#result-text", Static).render()
+        )
+        await pilot.press("escape")
+        await pilot.press("x")
+        await _fill(app, pilot, confirm="RESET")
+        await pilot.pause(0.2)
+        assert calls == [1]
+        assert isinstance(app.screen, tui.ResultScreen)
+
+
+async def test_reset_is_refused_without_a_builder_in_process(peers, genesis):
+    from matrix import tui
+
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("x")
+        assert not isinstance(app.screen, tui.FormScreen)
