@@ -527,3 +527,77 @@ def test_release_key_defaults_to_the_laptop_key(net, monkeypatch):
     args = ["release", "--repo", REPO, "--tag", "v1.2.0", "--commit", COMMIT]
     args += ["--wait", "5", "--out", str(net.tmp / "dist")]
     assert net.run(*args) == 0
+
+
+# command line structure and help
+
+
+def test_help_overview_lists_every_command_in_groups(capsys):
+    assert cli.run(["help"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    for name in ("up", "release", "status", "evidence", "tui", "verify", "keygen", "help"):
+        assert f"\n    {name} " in out
+    assert "Publish a release" in out and "exit codes" in out
+    assert cli.run(["--help"]) == cli.EXIT_OK and capsys.readouterr().out == out
+
+
+def test_help_for_one_command(capsys):
+    assert cli.run(["help", "release"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert out.startswith("usage: matrix release") and "--commit SHA" in out and "examples:" in out
+    assert cli.run(["release", "--help"]) == cli.EXIT_OK and capsys.readouterr().out == out
+
+
+def test_help_for_an_unknown_command_is_an_error(capsys):
+    assert cli.run(["help", "nope"]) == cli.EXIT_ERROR
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_bare_matrix_shows_the_overview_but_fails(capsys):
+    assert cli.run([]) == cli.EXIT_ERROR  # fail closed: no command is not success
+    assert "Run 'matrix help COMMAND'" in capsys.readouterr().err
+
+
+def test_global_options_before_or_after_the_command():
+    p = cli._parser()
+    before = p.parse_args(["--genesis", "g.json", "--node", "h:1", "status", "x"])
+    after = p.parse_args(["status", "x", "--genesis", "g.json", "--node", "h:1"])
+    assert (before.genesis, before.node) == (after.genesis, after.node) == ("g.json", "h:1")
+    mixed = p.parse_args(["--node", "h:1", "status", "x"])  # not reset by the command's default
+    assert (mixed.genesis, mixed.node) == (None, "h:1")
+
+
+def test_every_command_keeps_its_option_names():
+    """The commands read these attributes; the help rework must not rename any of them."""
+    p = cli._parser()
+    a = p.parse_args(["release", "--repo", REPO, "--tag", "v1", "--commit", COMMIT])
+    assert (a.repo, a.tag, a.commit, a.key, a.wait, a.out, a.output) == (
+        REPO,
+        "v1",
+        COMMIT,
+        None,
+        600,
+        "dist",
+        None,
+    )
+    a = p.parse_args(["verify", "f", "--cert", "c", "--repo", REPO, "--tag", "v1"])
+    assert (a.file, a.cert, a.repo, a.tag, a.commit, a.genesis_sha256) == (
+        "f",
+        "c",
+        REPO,
+        "v1",
+        None,
+        None,
+    )
+    a = p.parse_args(["up"])
+    assert (a.name, a.home, a.refound, a.advertise) == (None, None, False, None)
+    assert (a.allow_faults, a.fault, a.patch, a.hash) == (False, None, None, None)
+    assert p.parse_args(["evidence"]).since == "1h"
+    assert p.parse_args(["keygen", "--out", "k"]).out == "k"
+    for argv, fn in (
+        (["tui"], cli.cmd_tui),
+        (["status", "x"], cli.cmd_status),
+        (["up"], cli.cmd_up),
+        (["keygen", "--out", "k"], cli.cmd_keygen),
+    ):
+        assert p.parse_args(argv).fn is fn
