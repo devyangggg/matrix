@@ -106,7 +106,8 @@ Matrix moves the check **before** release, works for closed-source code, and rep
 | `ONLINE_WINDOW_S` | 15 s | A builder is online if its last accepted hello is younger |
 | `MAX_HELLO` | 512 bytes | Larger datagrams are dropped unparsed |
 | `MAX_CEREMONY` | 1024 bytes | Founder and endorse datagrams (a founder message is about 600 bytes); larger ones are dropped unparsed |
-| `FOUNDER_INTERVAL_S` | 2 s | Founder and endorse rebroadcast period |
+| `MAX_SEAL` | 2048 bytes | Seal proposals (they list every founder's name and key); larger ones are dropped unparsed |
+| `FOUNDER_INTERVAL_S` | 2 s | Founder, seal and endorse rebroadcast period |
 | `CEREMONY_TIMEOUT_S` | 300 s | The ceremony aborts without every endorsement |
 | tinc subnet | `10.77.0.0/24` | Only with the optional tinc layer (§7.13) |
 | Demo profile | `build_timeout_s 45`, `sync_interval_s 5` | Set in the demo's `network.toml` (single-machine dev networks: `genesis.demo.json`). Different values give a different genesis hash, so consumers must pin the hash of the network they use. |
@@ -227,7 +228,7 @@ Each laptop runs one builder process on port 7700 with its own Docker. All four 
 
 ### 6.3 Release lifecycle
 
-**Founding (once per network).** Each laptop runs `matrix up` (§7.16). It generates its keys if absent and announces itself as a founder. When the expected laptops are listed, the users seal; every laptop builds the same genesis and shows its short code. The team reads the code aloud, each user confirms, and each laptop broadcasts its endorsement. With an endorsement from every listed node, genesis becomes active and each laptop starts its builder. Later runs of `matrix up` skip the ceremony.
+**Founding (once per network).** Each laptop runs `matrix up` (§7.16). It generates its keys if absent and announces itself as a founder. When the expected laptops are listed, **one** user proposes the seal; that laptop builds the genesis, shows its short code and broadcasts a signed proposal that carries the founder list. Every other laptop shows the proposal (who proposes, which founders, and what differs from what it heard itself) and its user accepts it. The team reads the code aloud, each user confirms, and each laptop broadcasts its endorsement. With an endorsement from every listed node, genesis becomes active and each laptop starts its builder. Later runs of `matrix up` skip the ceremony.
 
 **Running.** Each builder broadcasts a signed hello every `HELLO_INTERVAL_S`; peers update their address books (§7.15). A builder that disconnects stays a member. When it returns, its newer hello updates its address everywhere and pull sync fetches what it missed.
 
@@ -356,9 +357,9 @@ Dependencies: `pynacl`, `aiohttp`, `textual`. `tomllib`, `socket` and `asyncio` 
 
 At startup a builder checks, and refuses to start otherwise:
 
-- `n ≥ 4f`, `2f+1 ≤ replicas ≤ n`, `threshold == f+1`
+- `n ≥ 4f`, `2f+1 ≤ replicas ≤ n`, `threshold == f+1`. `f = 0` is allowed: a ceremony with 2 or 3 founders gives f = 0, T = 1, so one builder alone certifies. It is for testing only and `matrix up` warns about it
 - `build_timeout_s < request_ttl_s`
-- every node has an `operator`, and no operator has more than `f` nodes
+- every node has an `operator`, and no operator has more than `f` nodes (more than 1 when f = 0)
 - node IDs and release-signer IDs are unique across both lists, and all public keys are distinct
 - `allowed_repos`, `allowed_images`, `allowed_goos`, `allowed_goarch` and `release_signers` are non-empty
 - `addr`, where present, is `host:port`
@@ -443,7 +444,7 @@ Envelope types:
 | `release` | A genesis release signer | The release request (§7.3) |
 | `attest` | A genesis builder | `{request_id, result}`; `result` is 64 lowercase hex or `"FAILED"` |
 
-The UDP messages `hello` (§7.15) and `endorse` (§7.16) use the same signed-bytes construction with the builder's genesis key, but are parsed only by discovery and ceremony code; `Envelope.parse` rejects them (rule 1). Because `type` is inside the signed bytes, no signature transfers between message types. `founder` (§7.16) uses its own prefix, because no genesis hash exists yet.
+The UDP messages `hello` (§7.15) and `endorse` (§7.16) use the same signed-bytes construction with the builder's genesis key, but are parsed only by discovery and ceremony code; `Envelope.parse` rejects them (rule 1). Because `type` is inside the signed bytes, no signature transfers between message types. `founder` and `seal` (§7.16) use the founder prefix, because no genesis hash exists yet.
 
 `Envelope.parse(raw, genesis)` returns an envelope or `None` and **never raises**. It requires:
 
@@ -887,16 +888,30 @@ One command per laptop creates a network: no files to edit, no authority. Member
 - `params_hash` = SHA-256 of the canonical JSON of the `network.toml` values.
 - The screen lists founders as they appear (name and a short key fingerprint) and flags any founder whose `params_hash` differs from ours.
 
-**2. Seal.** Each user presses Enter when the expected laptops are listed. Sealing is refused unless there are at least 4 founders, their ids are unique and every `params_hash` matches. Each laptop then builds genesis **deterministically**:
+**2. Propose.** When the expected laptops are listed, **one** user presses Enter. Proposing is refused unless there are at least 2 founders (3 or fewer give f = 0, see §7.2), their ids are unique, no key is announced under two names (below) and every `params_hash` matches. The proposer then builds genesis **deterministically**:
 
 - network parameters from `network.toml`; `network_id` = `[network] name`;
 - `nodes` sorted by pubkey as `{id: name, operator: name, pubkey}`, with no `addr`;
 - `release_signers` sorted by their own `pubkey` (the release key) as `{id: name + "-rel", pubkey: release_pubkey}`;
 - `f = n // 4`, `replicas = n`, `threshold = f + 1`.
 
-The same founders give a byte-identical canonical genesis, so the same hash on every laptop. The result must pass the §7.2 startup checks.
+The same founders give a byte-identical canonical genesis, so the same hash on every laptop. The result must pass the §7.2 startup checks. It shows the founder list and the short code, then broadcasts a **seal proposal** every `FOUNDER_INTERVAL_S`, together with its founder announcement:
 
-**3. Compare.** The short code is the first 16 hex characters of the genesis hash, upper case, grouped in fours: `3F2A-9C1D-77E0-41B8`. Its 64 bits are too many to grind during a one-minute ceremony. The team reads it aloud, and every user confirms with `y` if it matches and the list shows exactly the expected laptops. This human comparison is the trust root, as in Bluetooth pairing or Signal safety numbers. Without a central authority it cannot be removed, only made quick.
+```json
+{"v": 1, "type": "seal", "signer": "<proposer node pubkey hex>",
+ "body": {"network_id": "matrix-acme-2026", "genesis_hash": "<64 hex>",
+          "founders": [{"id": "laptop-a", "pubkey": "<node pubkey hex>"}, ...]},
+ "sig": "<128 hex>"}
+```
+
+- `founders` is sorted by `pubkey`, lists 1 to 16 distinct keys and includes the signer; signed like `founder` (founder prefix, node key). It carries no authority: a seal only proposes, and nothing counts until every founder endorses (step 4).
+- A receiver parses it strictly (never raises), and re-judges it whenever a founder or a seal arrives, so a proposal that arrives before a founder it lists, or after a lost datagram, is not wrong, only early:
+  - **waiting**: a listed key is not heard yet, or is heard under another name;
+  - **refused**: the proposal's founders (or its genesis hash) differ from what the receiver would seal, the receiver is not listed, or the receiver also hears a founder the proposal lacks;
+  - **ok**: the founders, the recomputed genesis hash and the checks above all match.
+- The screen prints the proposer, the founder list, the short code and the differences each time that judgement changes. Every acceptable proposal equals the receiver's own list, so all give the same genesis.
+
+**3. Compare and accept.** The short code is the first 16 hex characters of the genesis hash, upper case, grouped in fours: `3F2A-9C1D-77E0-41B8`. Its 64 bits are too many to grind during a one-minute ceremony. The team reads it aloud. The proposer confirms with `y` if the list shows exactly the expected laptops; every other user accepts the printed proposal with `y` if the code matches and the list is exactly the expected laptops. This human comparison is the trust root, as in Bluetooth pairing or Signal safety numbers. Without a central authority it cannot be removed, only made quick. A proposer may answer `n` to withdraw; a laptop may press Enter to propose its own list instead (for example when a proposal lacks a founder it hears).
 
 **4. Endorse.** After `y`, each laptop broadcasts every 2 s:
 
@@ -905,6 +920,8 @@ The same founders give a byte-identical canonical genesis, so the same hash on e
 ```
 
 signed with the node key in the normal domain (`b"matrix/v1\0" + genesis_hash + b"\0"`, §7.4). Genesis becomes **active only with a valid endorsement from every node listed in it** (unanimity: anyone can veto). If the endorsements are not all in within `CEREMONY_TIMEOUT_S` = 300 s, `matrix up` aborts and writes nothing.
+
+**One key, one name.** Founders are keyed by public key and the latest announcement wins. A key that announces two different names within `ONLINE_WINDOW_S` (typically two `matrix up` processes on one laptop, one of them stale) is flagged on screen and blocks proposing and accepting until one stops; otherwise the name would flip and laptops would seal different genesis files.
 
 **5. Start.** Write `~/.matrix/genesis.json`, `~/.matrix/genesis.sha256` (the pin) and `~/.matrix/endorsements.json`, then start the builder in the same process: its id is the genesis node whose pubkey is ours, it listens on `0.0.0.0:7700`, its data directory is `~/.matrix/data`, and discovery is on.
 
@@ -919,9 +936,10 @@ signed with the node key in the normal domain (`b"matrix/v1\0" + genesis_hash + 
 
 **Attacks on the ceremony**
 
-- A rogue device on the hotspot either is not in a laptop's list, or shows up there as an extra row and changes that laptop's short code. The team refuses to confirm.
-- A rogue that announces a member's name with its own key creates a duplicate id, so sealing is refused. It cannot sign with a member's key.
-- A founder with a different `network.toml` is flagged, and sealing is refused.
+- A rogue device on the hotspot either is not in a laptop's list, or shows up there as an extra row. A proposal that lacks it is then "refused" on that laptop and a proposal that lists it changes the short code, so the team refuses to confirm.
+- A rogue that announces a member's name with its own key creates a duplicate id, so proposing is refused. It cannot sign with a member's key.
+- A founder with a different `network.toml` is flagged, and proposing is refused.
+- A rogue's seal proposal changes nothing by itself: it can only list founders that are signed founder announcements the receiver also heard, and it counts only after every founder, including the honest ones, endorses the exact hash after comparing the short code aloud.
 - An endorsement binds one exact genesis hash, so it cannot count for a different founder set.
 - After founding, a stranger's founder messages are ignored and its hellos fail the §7.15 checks.
 
@@ -958,7 +976,7 @@ Safety holds with ≤ f malicious builders. Liveness additionally needs enough h
 | Receiver restarts | Its `seq` memory is empty, so one replayed old hello may be accepted until the signer's next hello replaces it (liveness only). |
 | Sender's clock steps back | Its hellos carry a lower `seq` and are dropped until its clock passes the last accepted `seq`; its last known address stays in the book (liveness only). |
 | Broadcasts blocked (firewall, client isolation, WSL not mirrored) | Founders and builders do not appear, or show offline. Nothing becomes insecure, only unreachable; fix the network (`docs/OPS.md`). |
-| Short codes differ | The laptops saw different founders or have different `network.toml` files. Nobody confirms; fix and rerun `matrix up`. |
+| Short codes differ, or a proposal is "refused" | The laptops saw different founders or have different `network.toml` files; the screen says which founder differs. Nobody confirms; fix and rerun `matrix up`, or press Enter on the laptop that hears everyone to propose the full list. |
 | Ceremony incomplete | Without every endorsement within `CEREMONY_TIMEOUT_S`, `matrix up` aborts and writes nothing. |
 | GitHub or the module proxy unreachable | Environmental `ERROR`: builders retry, then abstain. The release stays `PENDING` and can be re-run later. It is never `BUILD_FAILED`. |
 | Real compile error | Honest builders all attest `FAILED`; the release is blocked with `BUILD_FAILED` (exit 5). |
@@ -986,7 +1004,7 @@ Safety holds with ≤ f malicious builders. Liveness additionally needs enough h
 |---|---|
 | Unit | Canonical JSON stability; sign and verify round-trip, including cross-network replay rejection; selection determinism; strict-parse tests for requests, recipes, envelopes and certificates; verdict table tests for every state in §6.4; `verify` tests for wrong genesis, unsigned request, wrong repo, wrong tag and too few attestations; optional genesis `addr` |
 | Discovery | Hello receiver checks: oversize, unknown or missing keys, non-member signer, wrong genesis hash, replayed or older `seq`, bad signature, all dropped without raising; address-book update and the `ONLINE_WINDOW_S` boundary; resolution order (address book, genesis `addr`, unreachable); `/v1/peers` output re-verifies; log endpoint 404 for non-loopback callers |
-| Ceremony | With fake sockets: founder parsing and self-signature; the same founders in any arrival order give a byte-identical genesis; seal refused with fewer than 4 founders, duplicate ids or a differing `params_hash`; short-code format; activation only with every member's endorsement; abort after `CEREMONY_TIMEOUT_S` with nothing written; an extra rogue founder changes the short code; later runs skip the ceremony |
+| Ceremony | With fake sockets: founder parsing and self-signature; the same founders in any arrival order give a byte-identical genesis; proposing refused with fewer than 2 founders, duplicate ids, a key under two names or a differing `params_hash`; 2 founders give f = 0; seal strict parsing (proposer not listed, unsorted founders, bad signature, wrong network, oversize); other laptops accept one proposal, also when 5 proposals are lost on the wire; a proposal that arrives before its founder waits and then shows; short-code format; activation only with every member's endorsement; abort after `CEREMONY_TIMEOUT_S` with nothing written; a withdrawn proposal or an extra rogue founder blocks the genesis; later runs skip the ceremony |
 | Verdict model check | Enumerate every assignment for the selected builders, for (n, f) = (4, 1) and (8, 2): each honest builder attests the true hash or abstains; each malicious builder (≤ f) abstains, attests `FAILED`, one of two fake hashes or the true hash, or equivocates. Assert: (a) `AGREED` only ever names the true hash; (b) if ≥ T honest builders attested the true hash the verdict is `AGREED(true)`; (c) the function never raises |
 | Fuzz | Random malformed envelopes, bundles, certificates and hellos through the parsers, `verdict` and `verify` |
 | Integration (one machine) | 4 builders on `127.0.0.1:7700–7703` (`scripts/dev_genesis.py --nodes 4`, static `addr`s, `--no-discovery`), using the demo profile; scripted fault matrix `{inject, lie, collude, stall, crash, equivocate, bad-artifact}` × 1 builder; one case with 1 malicious plus 1 crashed honest builder (still certifies) and one with 3 crashed (stays `PENDING`); a queued request settled by peers is not built |

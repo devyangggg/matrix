@@ -62,6 +62,7 @@ All protocol parameters come from genesis. Only these are code constants (`matri
 | `FOUNDER_INTERVAL_S` | 2 (`discovery.py`) | RFC rev 5 |
 | `CEREMONY_TIMEOUT_S` | 300 (`discovery.py`) | RFC rev 5 |
 | `MAX_CEREMONY` | 1024 bytes, founder and endorse datagrams (`discovery.py`) | LLD (L39) |
+| `MAX_SEAL` | 2048 bytes, seal proposals (`discovery.py`) | LLD (L54) |
 | `FOUNDER_PREFIX` | `b"matrix/v1-founder\0"` (`discovery.py`) | RFC rev 5 |
 
 ## 3. Module contracts
@@ -127,7 +128,7 @@ Validation (raise `GenesisError`, refuse to start):
 - Exactly the top-level keys of RFC §7.2. Every int is `type(x) is int` and > 0.
 - `n = len(nodes)`: `n >= 4*f`, `2*f+1 <= replicas <= n`, `threshold == f+1`, `build_timeout_s < request_ttl_s`.
 - Node and signer IDs match `[A-Za-z0-9_-]{1,32}`, are unique **across both lists**; all pubkeys are 64 lowercase hex and distinct.
-- Every node has a non-empty `operator`; no operator has more than `f` nodes.
+- Every node has a non-empty `operator`; no operator has more than `f` nodes (more than 1 when f = 0). `f = 0` is allowed (L53).
 - Node keys are exactly `{id, operator, pubkey}` or `{id, operator, addr, pubkey}`. `addr` is optional (`None` when absent) and, when present, matches `[A-Za-z0-9.-]+:[0-9]{1,5}`. Ceremony genesis omits it (addresses come from hellos, §3.10a); dev genesis keeps static addrs (§12). Addresses are not security relevant: an IP in genesis would change the hash whenever DHCP does.
 - `allowed_repos` entries match `https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+`.
 - `allowed_images` values match `[a-z0-9./_-]+@sha256:[0-9a-f]{64}`.
@@ -434,7 +435,7 @@ A stranger fails 2, a forgery 5, a replay 4. A member can only advertise a wrong
 `Discovery.run()`:
 
 - Bind, or raise (the node refuses to start, §3.12). The announce loop wakes every 1 s. Advertised address = `advertise` if set, else `f"{local_ip()}:{listen_port}"`; no local IP → skip the round.
-- Send a hello at startup, every `HELLO_INTERVAL_S`, and at once when the advertised address changes. Every hello carries a fresh `seq = max(int(clock() * 1000), last_sent + 1)`, because receivers drop a repeated seq. Send to `("255.255.255.255", port)`, then `book.update(own hello)`, so `/v1/peers` lists this node too. The own broadcast that comes back fails check 4 harmlessly.
+- Send a hello at startup, every `HELLO_INTERVAL_S`, and at once when the advertised address changes. Every hello carries a fresh `seq = max(int(clock() * 1000), last_sent + 1)`, because receivers drop a repeated seq. Send to `("255.255.255.255", port)` and to every `broadcast_targets()` address (L55), then `book.update(own hello)`, so `/v1/peers` lists this node too. The own broadcast that comes back fails check 4 harmlessly.
 - Receive (`asyncio.DatagramProtocol`): `h = book.accept(data)`. If `update` reported a new or changed address, also unicast the latest own hello to `(host of h.addr, port)` (fast convergence). Log `peer.online` / `peer.addr` on transitions and `peer.offline` when a node leaves the online window.
 - Send errors (no network, Wi-Fi off) are logged at DEBUG and retried next round. Callbacks never raise.
 
@@ -445,6 +446,8 @@ A stranger fails 2, a forgery 5, a replay 4. A member can only advertise a wrong
 class Founder: id: str; pubkey: str; release_pubkey: str; params_hash: str; raw: dict
 @dataclass(frozen=True)
 class Endorse: signer: str; genesis_hash: str; raw: dict
+@dataclass(frozen=True)
+class Seal: signer: str; genesis_hash: str; founders: tuple[tuple[str, str], ...]; raw: dict  # (name, pubkey), sorted by pubkey
 
 def load_network(path: str) -> dict            # the [network] table of network.toml; raises NetworkError
 def params_hash(params: dict) -> str           # sha256_hex(canonical_json(params))
@@ -459,6 +462,9 @@ def ceremony_genesis(params: dict, founders: Sequence[Founder]) -> dict     # ra
 def short_code(genesis_hash: str) -> str       # "3F2A-9C1D-77E0-41B8"
 def make_endorse(g: Genesis, me: Node, sk) -> bytes
 def parse_endorse(data: bytes, pubkeys: Mapping[str, str]) -> Endorse | None   # id -> pubkey; never raises
+def make_seal(network_id: str, sk, founders: Sequence[Founder], genesis_hash: str) -> bytes
+def parse_seal(data: bytes, network_id: str) -> Seal | None                   # never raises
+def broadcast_targets() -> list[str]           # "255.255.255.255" + each interface's broadcast address (L55)
 def check_endorsements(g: Genesis, envs: Iterable[Any]) -> bool
     # True iff every node in g has a valid endorse of g.hash, verified with its genesis pubkey
 ```
@@ -468,18 +474,20 @@ def check_endorsements(g: Genesis, envs: Iterable[Any]) -> bool
 - Founder signature: `sk.sign(founder_bytes(network_id, unsigned)).signature.hex()`, verified with `nacl.signing.VerifyKey` inside `try`. The separate prefix means a founder signature can never be replayed as an envelope, and the reverse.
 - `parse_founder`: `len(data) <= MAX_CEREMONY`; `loads_strict`; keys exactly `{v, type, signer, body, sig}`; `v` 1; `type == "founder"`; body keys exactly `{network_id, id, pubkey, release_pubkey, release_sig, params_hash}`; `body.network_id == network_id` (other networks on the hotspot are ignored); `id` matches the name rule; `signer`, `pubkey`, `release_pubkey`, `params_hash` 64 lowercase hex; `signer == body.pubkey`; `release_pubkey != pubkey`; `release_sig` verifies with `release_pubkey` over `founder_bytes(network_id, {pubkey, release_pubkey})` (a founder cannot claim someone else's release key, L49); the signature verifies with `signer` (proof of possession).
 - `parse_endorse`: `len(data) <= MAX_CEREMONY`; exact envelope keys; `type == "endorse"`; body keys exactly `{genesis_hash}`, 64 hex; `pubkeys[signer]` exists; `crypto.verify(pubkey, body.genesis_hash, unsigned, sig)`. It is verified with the hash it carries, so an endorsement that arrives before the local seal is kept; it counts only if that hash equals ours (L42).
-- `seal_problem` returns a reason, or `None` to allow the seal: at least 4 founders; unique ids; every `params_hash == params_hash(params)`; `me_pubkey` listed; `parse_genesis(ceremony_genesis(...))` succeeds.
+- `seal_problem` returns a reason, or `None` to allow a proposal: at least 2 founders (L53); unique ids; every `params_hash == params_hash(params)`; `me_pubkey` listed; `parse_genesis(ceremony_genesis(...))` succeeds.
+- `make_seal` / `parse_seal` (L54): `type == "seal"`, signed with the node key over `founder_bytes(network_id, unsigned)`; body keys exactly `{network_id, genesis_hash, founders}`; `founders` is a list of 1 to 16 `{id, pubkey}` (name rule, 64 hex), sorted by and distinct in `pubkey`, containing `signer`; `len(data) <= MAX_SEAL`; the signature verifies with `signer`.
 - `ceremony_genesis` (deterministic: same founders and `network.toml` → byte-identical canonical genesis → same hash on every laptop): `n = len(founders)`, `f = n // 4`, `replicas = n`, `threshold = f + 1`; `network_id = params["name"]`; the other seven parameters copied from `params`; `nodes` sorted by `pubkey` as `{id, operator: id, pubkey}` (no `addr`); `release_signers` sorted by their `pubkey` as `{id: id + "-rel", pubkey: release_pubkey}`.
 - `short_code(h)`: `h[:16].upper()` in groups of 4 joined by `-` (64 bits: too many to grind in a one-minute ceremony).
 
-Ceremony steps (`cli.cmd_up`; nothing is written until step 6):
+Ceremony steps (`cli.ceremony`; nothing is written until step 7):
 
 1. Keys, `network.toml`, name (§3.13). Bind the ceremony socket.
-2. Every `FOUNDER_INTERVAL_S` broadcast the own founder. Collect founders keyed by `pubkey` (latest wins; self included) and endorsements from listed founder ids. The screen lists each founder as `name  pubkey[:8]` and flags `params MISMATCH`.
-3. Enter → `seal_problem`; a reason is printed and listening continues.
-4. Build `g = parse_genesis(ceremony_genesis(...))`, print `short_code(g.hash)` and the founder list, prompt. Anything but `y` aborts (exit 4).
-5. Broadcast `make_endorse` every `FOUNDER_INTERVAL_S` (founders too, for slower laptops) until `check_endorsements` holds (unanimity: anyone can veto). An endorsement from a genesis node for a different hash → abort. No unanimity within `CEREMONY_TIMEOUT_S` after `y` → abort.
-6. Write `genesis.json` (canonical JSON), `genesis.sha256`, `endorsements.json` (each via temp file + rename) and start the node (§3.13). Keep broadcasting the own endorse every `FOUNDER_INTERVAL_S` for `CEREMONY_TIMEOUT_S` so laptops that confirmed later can finish (L42).
+2. Every `FOUNDER_INTERVAL_S` broadcast the own founder (and, once proposed, the own seal) to every `broadcast_targets()` address. Collect founders keyed by `pubkey` (latest wins; self included), seal proposals keyed by proposer (never our own) and endorsements from listed founder ids. The screen lists each founder as `name  pubkey[:8]` and flags `params MISMATCH`. Also keep `names[pubkey][name] = last seen`: a key with two names seen within `ONLINE_WINDOW_S` is flagged (L56).
+3. Judge each proposal against our founders, again on every new founder or seal (L54): `waiting` (a listed key not heard, or under another name), `refused` (`seal_problem` on its list, a different recomputed genesis hash, an unlisted laptop we hear, or a key under two names), `ok` (everything matches). Print the proposer, the founder list, the short code and the notes whenever the judgement changes; with fewer than 4 founders also the f = 0 warning.
+4. Input at the main prompt: `y` accepts the newest `ok` proposal (all `ok` proposals give the same genesis); an empty line or anything else proposes: `seal_problem` and the one-name check, then print the list, the short code and (f = 0) the warning, add `make_seal` to the datagrams re-sent every round, and ask `confirm`. `y` goes on; anything else withdraws the proposal and returns to the main prompt; end of input aborts (exit 4).
+5. Build `g = parse_genesis(ceremony_genesis(...))` from the accepted or proposed list.
+6. Broadcast `make_endorse` every `FOUNDER_INTERVAL_S` (founders and the proposal too, for slower laptops) until `check_endorsements` holds (unanimity: anyone can veto). An endorsement from a genesis node for a different hash → abort. No unanimity within `CEREMONY_TIMEOUT_S` after `y` → abort.
+7. Write `genesis.json` (canonical JSON), `genesis.sha256`, `endorsements.json` (each via temp file + rename) and start the node (§3.13). Keep broadcasting the own endorse every `FOUNDER_INTERVAL_S` for `CEREMONY_TIMEOUT_S` so laptops that confirmed later can finish (L42).
 
 ### 3.11 `faults.py`
 
@@ -713,6 +721,11 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L50 | `local_ip()` tries `255.255.255.255:7788`, then `192.0.2.1:9` (TEST-NET-1, follows the default route); loopback and `0.0.0.0` count as no address. UDP `connect` sends nothing |
 | L51 | The CLI's `ClientBook` maps the local builder's genesis id (from `--node`'s `/v1/health`) to the `--node` address, so its loopback-only routes (the log) work; every other builder comes from verified hellos or genesis `addr`. `release` POSTs resolve through the same book |
 | L52 | The ceremony takes an injected bus and `ask(kind)` (`"seal"` / `"confirm"`); production uses UDP and a daemon stdin thread (an interrupted ceremony never waits for Enter on exit); tests run four ceremonies in memory |
+| L53 | **RFC rev 5.** `f = 0` is allowed in `parse_genesis` (`f >= 0`, other integers `>= 1`) and `max(per-operator nodes) <= max(f, 1)`, so `matrix up` can found a 2 or 3 laptop test network (T = 1: one builder certifies). The ceremony minimum is 2 founders and it prints a warning for f = 0. Frozen contract changed on purpose: needs Track A approval |
+| L54 | The ceremony adds the signed `seal` proposal (founder prefix, `MAX_SEAL` = 2048 bytes: a seal lists name and key of every founder, about 140 bytes each). One laptop proposes, the others accept with `y`; a receiver re-judges each proposal on every founder or seal arrival, so loss and reordering only delay. Founding still needs every founder's endorsement of one exact hash. No explicit refusal message: not endorsing is the veto |
+| L55 | `broadcast_targets()` sends hellos and ceremony datagrams to `255.255.255.255` and to each interface's own broadcast address (`SIOCGIFBRDADDR` ioctl on Linux and macOS; elsewhere only the limited broadcast): the limited broadcast leaves by the default route only, and some networks drop it but forward the directed one |
+| L56 | A key announcing two names within `ONLINE_WINDOW_S` blocks proposing and accepting and is flagged on screen: two `matrix up` processes on one laptop made the latest-wins name flip, so laptops sealed different genesis files |
+| L57 | `-v` / `--verbose` on every command (and `matrix-node`) sets the root logger to DEBUG on stderr (`~/.matrix/verbose.log` for `tui`): every step, UDP datagram, HTTP call and Docker command is logged under `matrix.cli`, `matrix.discovery`, `matrix.net`, `matrix.builder`, `matrix.node`. Without it nothing changes, except a one-time warning when no other laptop is heard during the ceremony |
 
 ## 11. Tests
 
@@ -730,7 +743,7 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | `tests/test_protocol.py` | `Engine` with a fake `build` and fake `PeerClient`: requests queue in order (never shed), settled requests are not built, persist-before-broadcast, restart re-sends without rebuilding, evidence kinds |
 | `tests/test_verify.py` | Wrong genesis, unsigned request, wrong repo, wrong tag, wrong commit, too few attestations, swapped file → correct exit codes |
 | `tests/test_discovery.py` | Hello round-trip; each receiver check rejects in order: over 512 bytes, duplicate keys, extra or missing keys, wrong `type`, bad `addr` or `seq`, unknown signer, foreign `genesis_hash`, replay (`seq` equal or lower), bad signature; a stranger's key is rejected before signature work; random mutations never raise. `AddressBook`: `update` reports new or changed address, highest seq wins, online exactly within 15 s on an injected clock, `hellos()` latest per node. `Discovery` with a fake transport: fresh seq per hello, own hello in the book, unicast reply on a new address, `--advertise` used verbatim |
-| `tests/test_up.py`, `tests/test_discovery.py` | `load_network` exact keys and types; `params_hash` stable; `parse_founder` rejects wrong network, `signer != pubkey`, bad self-signature, bad name, oversize; deterministic genesis: same founders in any arrival order → byte-identical canonical genesis and hash, f = n // 4, sorted nodes and signers, no `addr`; `short_code` format; seal refused with < 4 founders, duplicate ids or a params mismatch; unanimity: n − 1 endorsements not active, n active; an endorsement for another hash aborts; timeout aborts and writes nothing (fake sockets, injected clock) |
+| `tests/test_up.py`, `tests/test_discovery.py` | `load_network` exact keys and types; `params_hash` stable; `parse_founder` rejects wrong network, `signer != pubkey`, bad self-signature, bad name, oversize; deterministic genesis: same founders in any arrival order → byte-identical canonical genesis and hash, f = n // 4, sorted nodes and signers, no `addr`; `short_code` format; proposing refused with < 2 founders, duplicate ids, a key under two names or a params mismatch; 2 founders give f = 0 and a warning; `parse_seal` rejects an unlisted proposer, unsorted founders, a changed body, another network, oversize; other laptops accept one proposal, also with 5 seals lost; a proposal before its founder waits, then shows; unanimity: n − 1 endorsements not active, n active; an endorsement for another hash aborts; timeout aborts and writes nothing (fake sockets, injected clock); `broadcast_targets` starts with the limited broadcast, unique IPv4 entries, announce sends to every target |
 | `tests/test_net.py` | Every route and status code in openapi.yaml, plus `/v1/peers` and the log route returning 404 to a non-loopback caller; `PeerClient` prefers the book address over genesis `addr` and skips a node with neither |
 | `tests/test_cli.py` | `release`, `status`, `evidence` against a test server; address resolution via `/v1/peers` drops forged or foreign hellos; `release` keeps submitting until f+1 distinct operators accepted, online first, else exit 4; `up` with fake sockets: ceremony then node start, later run skips the ceremony, pin mismatch → 4 |
 | `tests/integration/test_matrix.py` (marked `integration`) | 8 local builders (f = 2, as before) and 4 local builders (`--nodes 4 --addrs local`, demo profile, `--no-discovery`), real Docker, RFC §9.1 fault matrix for f = 1: each fault mode on one builder still gives the honest verdict; 1 faulty + 1 offline certifies; 3 offline stays `PENDING` |

@@ -773,6 +773,10 @@ async def ceremony(
             for note in notes:
                 _out(f"   ! {note}")
             if state == "ok":
+                if len(s.founders) < 4:
+                    _out(
+                        "   WARNING: fewer than 4 founders gives f=0: one builder alone certifies."
+                    )
                 _out("   Same list as yours. Type y to accept once the short code matches aloud.")
             else:
                 _out("   Cannot accept yet." if state == "waiting" else "   Cannot accept this.")

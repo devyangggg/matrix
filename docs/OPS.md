@@ -345,7 +345,8 @@ the API off the LAN.
 |---|---|
 | Founders not appearing | Broadcast blocked: Windows firewall rules and profile `Private` (§2), Hyper-V rules `MatrixDiscovery`/`MatrixApi` missing (`Get-NetFirewallHyperVRule -VMCreatorId $wsl`), WSL not mirrored (`ip -4 addr` shows `172.x`), client isolation (§5 broadcast check). |
 | Short codes differ | Different founders seen (compare lists) or different `network.toml` (compare `git rev-parse HEAD`, `sha256sum network.toml`). Restart `matrix up` on all laptops. |
-| Seal refused | Fewer than 2 founders, a duplicate `--name`, or a params mismatch flag. |
+| Seal refused | Fewer than 2 founders, a duplicate `--name`, a key announced under two names (a stale `matrix up` on one laptop), or a params mismatch flag. |
+| Proposal says "Cannot accept this" or "waiting" | The laptops heard different founders. The screen says which: a founder not heard yet (wait, it re-checks itself), a founder the proposal lacks (press Enter on the laptop that hears everyone to propose the full list), a different name or `network.toml`. |
 | Ceremony aborted after 5 min | Not every laptop typed `y`, or endorsements do not arrive (UDP 7788). Nothing was written; run `matrix up` again. |
 | A builder offline in the TUI | Its hellos do not arrive: firewall (UDP 7788), Wi-Fi, or its node stopped. `curl -s http://127.0.0.1:7700/v1/peers` on another laptop shows its last hello. |
 | Online but builds never arrive | TCP 7700 blocked inbound on that laptop (§2, §3), or a wrong `--advertise`. |

@@ -110,10 +110,12 @@ sequenceDiagram
         L->>LAN: founder {network_id, id, pubkey, release_pubkey, params_hash}, self-signed
         LAN->>L: other founders, list name + key fingerprint, flag params_hash mismatch
     end
-    H->>L: Enter (seal): >= 4 founders, unique ids, equal params_hash
+    H->>L: Enter on ONE laptop (propose): >= 2 founders, unique ids, one name per key, equal params_hash
     L->>L: deterministic genesis (nodes and release_signers sorted by pubkey, no addr, f = n // 4)
     L->>H: short code = first 16 hex of genesis hash, e.g. 3F2A-9C1D-77E0-41B8
-    H->>L: read aloud, everyone confirms with y
+    L->>LAN: seal {genesis_hash, founders: [{id, pubkey}]}, signed, re-sent every 2 s
+    LAN->>L: other laptops judge it against the founders they heard: waiting / refused / ok, shown on screen
+    H->>L: read the code aloud; the proposer confirms with y, every other user accepts the proposal with y
     loop every 2 s, abort after 5 min
         L->>LAN: endorse {genesis_hash}, signed with the node key
     end

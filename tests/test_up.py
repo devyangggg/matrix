@@ -562,8 +562,14 @@ def _double_enter(queue: asyncio.Queue):
     """laptop-a's user presses Enter twice to seal: one stale line stays queued, like the real
     stdin reader. At the y/N prompt they type `y` only if nothing stale answered first."""
 
+    seals = 0
+
     async def ask(kind):
+        nonlocal seals
         if kind == "seal":
+            seals += 1
+            if seals > 1:
+                return ""  # a stale Enter withdrew the proposal; the user gives up
             await asyncio.sleep(0.02)
             queue.put_nowait("\n")  # the second press
             return "\n"

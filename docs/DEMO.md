@@ -129,7 +129,7 @@ founding network matrix-demo (network.toml params a41c…)
   laptop-b   0c7d 88a1
   laptop-c   e2b4 5f19
   laptop-d   41aa 0d3e
-4 founders, params match. Press Enter to seal.
+4 founders, params match. One laptop presses Enter to propose the seal.
 ```
 
 When all four rows are listed on every screen, **one** user presses **Enter**. That laptop shows
@@ -258,7 +258,7 @@ matrix up --home /tmp/rogue --name laptop-b
 ```
 
 What judges see: the rogue's screen finds no network to join. The founded laptops ignore
-ceremony messages, so it lists only itself and can never seal (fewer than 4 founders). Its key
+ceremony messages, so it lists only itself and can never propose a seal (fewer than 2 founders). Its key
 is not in genesis, so anything it sends as `laptop-b` fails the membership or signature check and
 is dropped. TUI on A, Builders: still exactly 4 rows, `laptop-b` online at its **real** address.
 
