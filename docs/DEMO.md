@@ -157,7 +157,7 @@ behind it; `q` closes the dashboard, Ctrl-C then stops the builder). Laptop A us
 Laptop A, T2:
 
 ```bash
-cd ~/Matrix && . .venv/bin/activate && matrix tui  # b builders, r releases, Enter detail, l log, e evidence, q quit
+cd ~/Matrix && . .venv/bin/activate && matrix tui  # b builders, r releases, Enter detail, l log, e evidence, n new release, v verify, k keygen, q quit
 ```
 
 The intro (about two seconds, any key skips it) hands over to the dashboard. Builders screen:

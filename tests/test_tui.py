@@ -343,3 +343,80 @@ async def test_builders_online_from_signed_hellos(peers, genesis, keys):
         assert by_id["builder6"][2] == "○ DOWN"  # stale hello, even though health answers
         assert by_id["builder7"][2] == "○ DOWN"  # never heard from: still listed (not left)
         assert "5 online" in _text(app, "#peers-title")
+
+
+# --- forms: release, verify and keygen run the CLI code from inside the dashboard ---------------
+
+
+async def _fill(app, pilot, **values):
+    from textual.widgets import Input
+
+    for key, value in values.items():
+        app.screen.query_one(f"#f-{key}", Input).value = value
+    app.screen.query(Input).last().focus()
+    await pilot.press("enter")  # Enter on the last field runs the form
+    await pilot.pause()
+
+
+async def test_release_form_runs_the_release_job_and_shows_its_output(peers, genesis, monkeypatch):
+    from matrix import tui
+
+    seen = []
+
+    async def fake_release(a, g, local):
+        seen.append((a, g, local))
+        print("CERTIFIED " + "a" * 64)
+        return 0
+
+    monkeypatch.setattr(tui, "release_job", fake_release)
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("n")
+        assert isinstance(app.screen, tui.FormScreen)
+        await _fill(app, pilot, tag="v1.2.0", commit="1" * 40)
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, tui.ResultScreen)
+        assert "CERTIFIED" in str(app.screen.query_one("#result-text", Static).render())
+        assert "exit 0" in app.screen.query_one("#result").border_title
+        [(a, g, local)] = seen
+        assert (a.repo, a.tag, a.commit, a.wait, a.out) == (
+            genesis.allowed_repos[0],
+            "v1.2.0",
+            "1" * 40,
+            600,
+            "dist",
+        )
+        assert a.output is None and local == LOCAL and g is genesis
+        await pilot.press("escape")
+        assert app._job is None and not isinstance(app.screen, tui.ResultScreen)
+
+
+async def test_form_needs_its_required_fields(peers, genesis, monkeypatch):
+    from matrix import tui
+
+    async def never(a, g, local):
+        raise AssertionError("the job must not start")
+
+    monkeypatch.setattr(tui, "release_job", never)
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("n")
+        await _fill(app, pilot, tag="", commit="1" * 40)  # the tag is missing
+        assert isinstance(app.screen, tui.FormScreen)
+        await pilot.press("escape")
+        assert not isinstance(app.screen, tui.FormScreen) and app._job is None
+
+
+async def test_keygen_form_writes_a_private_key_and_shows_the_public_one(peers, genesis, tmp_path):
+    from matrix import tui
+
+    out = tmp_path / "extra.key"
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("k")
+        await _fill(app, pilot, out=str(out))
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, tui.ResultScreen)
+        shown = str(app.screen.query_one("#result-text", Static).render())
+        assert len(shown) == 64 and set(shown) <= set("0123456789abcdef")
+        assert (out.stat().st_mode & 0o777) == 0o600

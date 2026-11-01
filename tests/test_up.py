@@ -31,7 +31,7 @@ def fake_tui(monkeypatch):
     apps = []
 
     class FakeApp:
-        def __init__(self, g, local):
+        def __init__(self, g, local, home=None):
             self.quit = asyncio.Event()
             apps.append(self)
 

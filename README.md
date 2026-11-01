@@ -131,7 +131,8 @@ reproducible, `3` pending, `4` error, `5` build failed.
 </p>
 
 TUI keys: `b` builders, `r` releases, `Enter` detail, `l` log (this laptop only), `e` evidence,
-`q` quit.
+`n` new release, `v` verify, `k` keygen (forms that run the same code as `matrix release`,
+`verify` and `keygen`), `q` quit.
 
 ## Demo scenes
 

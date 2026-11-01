@@ -422,6 +422,12 @@ def cmd_release(a: argparse.Namespace) -> int:
     local = _local(a)
     if g is None or local is None:
         return EXIT_ERROR
+    return asyncio.run(release_job(a, g, local))
+
+
+async def release_job(a: argparse.Namespace, g: Genesis, local: str) -> int:
+    """`matrix release` after the genesis and the local builder are known: load the release key,
+    then sign, submit, wait and download. Shared by the CLI and the TUI."""
     key = a.key or str(Path.home() / ".matrix" / "keys" / "release.key")
     try:
         sk = load_key(key)
@@ -429,7 +435,7 @@ def cmd_release(a: argparse.Namespace) -> int:
         _err(f"cannot load key: {e}")
         return EXIT_ERROR
     log.info("release: key %s loaded", key)
-    return asyncio.run(_release(a, g, sk, local))
+    return await _release(a, g, sk, local)
 
 
 async def _release(a: argparse.Namespace, g: Genesis, sk: Any, local: str) -> int:
@@ -1239,7 +1245,7 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
                 logfile = home / "verbose.log"
                 _out(f"verbose log: {logfile}")
                 node.configure_logging(True, str(logfile))
-            await _node_and_tui(node, args, g, "127.0.0.1:7700")
+            await _node_and_tui(node, args, g, "127.0.0.1:7700", str(home))
         else:
             await node.run(args)
     except ValueError as e:
@@ -1269,7 +1275,9 @@ async def _wait_listening(local: str, task: "asyncio.Task", seconds: float = 30)
             await asyncio.sleep(0.2)
 
 
-async def _node_and_tui(node: Any, args: argparse.Namespace, g: Genesis, local: str) -> None:
+async def _node_and_tui(
+    node: Any, args: argparse.Namespace, g: Genesis, local: str, home: str = "~/.matrix"
+) -> None:
     """Run the builder and the dashboard side by side on one terminal. If the builder stops the
     dashboard closes; if the user quits the dashboard the builder keeps running in the foreground."""
     from .tui import MatrixTui, play_intro
@@ -1280,7 +1288,7 @@ async def _node_and_tui(node: Any, args: argparse.Namespace, g: Genesis, local: 
         node_task.result()  # it stopped before listening: raise why
         return
     play_intro()
-    app = MatrixTui(g, local)
+    app = MatrixTui(g, local, home=home)
     tui_task = asyncio.create_task(app.run_async())
     done, _ = await asyncio.wait({node_task, tui_task}, return_when=asyncio.FIRST_COMPLETED)
     if node_task in done:
@@ -1507,7 +1515,8 @@ def _parser() -> argparse.ArgumentParser:
         "tui",
         "live dashboard: builders, releases and evidence",
         "Full-screen live view of the network through this laptop's builder. Keys: b builders,\n"
-        "r releases, Enter detail, l log (this laptop's builder only), e evidence, q quit.",
+        "r releases, Enter detail, l log (this laptop's builder only), e evidence, n new release,\n"
+        "v verify, k keygen (forms that run `matrix release`, `verify` and `keygen`), q quit.",
         "  matrix tui",
         "0 on quit, 4 error",
     )

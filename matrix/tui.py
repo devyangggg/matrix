@@ -6,8 +6,11 @@ the verified hellos it knows (/v1/peers) and each builder's /v1/health, runs ver
 what it fetched, and keeps nothing beyond the last poll result.
 """
 
+import argparse
 import asyncio
+import contextlib
 import curses
+import io
 import json
 import os
 import re
@@ -21,10 +24,21 @@ from typing import Any, ClassVar
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Input, Static
 
-from .cli import CLIENT, ClientBook, builder_rows, check_proof, refresh
+from .cli import (
+    CLIENT,
+    EXIT_ERROR,
+    ClientBook,
+    builder_rows,
+    check_proof,
+    cmd_keygen,
+    cmd_verify,
+    refresh,
+    release_job,
+)
 from .discovery import AddressBook
 from .genesis import Genesis
 from .model import parse_envelope, request_id
@@ -295,6 +309,98 @@ def _divider(width: int, split: int) -> Text:
 # the app
 
 
+class FormScreen(ModalScreen):
+    """A titled form. Enter moves to the next field and runs the form on the last one; Esc
+    cancels. Dismisses with {field: text} (all stripped), or None."""
+
+    BINDINGS: ClassVar = [Binding("escape", "cancel", "Cancel")]
+    DEFAULT_CSS = f"""
+    FormScreen {{ align: center middle; background: {_COLORS["background"]} 70%; }}
+    #form {{
+        width: 90%; max-width: 100; height: auto; padding: 1 2;
+        background: {_COLORS["background"]}; border: solid {_COLORS["blue"]};
+        border-title-color: {_COLORS["blue"]};
+    }}
+    #form .form-label {{ color: {_COLORS["muted"]}; background: {_COLORS["background"]}; }}
+    #form Input {{ background: {_COLORS["background"]}; border: tall {_COLORS["blue"]}; }}
+    #form-help {{ color: {_COLORS["muted"]}; background: {_COLORS["background"]}; margin-top: 1; }}
+    """
+
+    def __init__(self, title: str, fields: list[tuple[str, str, str]], required: set[str]):
+        super().__init__()
+        self.title_text, self.fields, self.required = title, fields, required
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="form"):
+            for key, label, default in self.fields:
+                star = " *" if key in self.required else ""
+                yield Static(label + star, classes="form-label")
+                yield Input(default, id=f"f-{key}")
+            yield Static(
+                "Enter: next field / run on the last      Esc: cancel      * required",
+                id="form-help",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#form").border_title = self.title_text
+        self.query(Input).first().focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input is not list(self.query(Input))[-1]:
+            self.focus_next()
+            return
+        values = {k: self.query_one(f"#f-{k}", Input).value.strip() for k, _, _ in self.fields}
+        missing = [k for k in self.fields_required(values)]
+        if missing:
+            self.app.notify(f"required: {', '.join(missing)}", severity="error")
+            self.query_one(f"#f-{missing[0]}", Input).focus()
+            return
+        self.dismiss(values)
+
+    def fields_required(self, values: dict[str, str]) -> list[str]:
+        return [k for k, _, _ in self.fields if k in self.required and not values[k]]
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ResultScreen(ModalScreen):
+    """What a job printed, with its exit code. Enter, Esc or q closes it."""
+
+    BINDINGS: ClassVar = [
+        Binding("escape", "close", "Close"),
+        Binding("enter", "close", "Close"),
+        Binding("q", "close", "Close"),
+    ]
+    DEFAULT_CSS = f"""
+    ResultScreen {{ align: center middle; background: {_COLORS["background"]} 70%; }}
+    #result {{
+        width: 90%; max-width: 120; height: auto; max-height: 85%; padding: 1 2;
+        background: {_COLORS["background"]};
+    }}
+    #result.ok {{ border: solid {_COLORS["green"]}; border-title-color: {_COLORS["green"]}; }}
+    #result.bad {{ border: solid {_COLORS["red"]}; border-title-color: {_COLORS["red"]}; }}
+    #result-text {{ height: auto; max-height: 30; background: {_COLORS["background"]}; }}
+    #result-help {{ color: {_COLORS["muted"]}; background: {_COLORS["background"]}; margin-top: 1; }}
+    """
+
+    def __init__(self, title: str, text: str, ok: bool):
+        super().__init__()
+        self.title_text, self.text, self.ok = title, text, ok
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="result", classes="ok" if self.ok else "bad"):
+            with VerticalScroll():
+                yield Static(Text(self.text), id="result-text")
+            yield Static("Enter / Esc: close", id="result-help")
+
+    def on_mount(self) -> None:
+        self.query_one("#result").border_title = self.title_text
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class MatrixTui(App):
     TITLE = "MATRIX"
     CSS = f"""
@@ -396,6 +502,9 @@ class MatrixTui(App):
         Binding("r", "show('releases')", "Releases"),
         Binding("e", "show('evidence')", "Evidence"),
         Binding("l", "toggle_log", "Log"),
+        Binding("n", "release", "New release"),
+        Binding("v", "verify", "Verify"),
+        Binding("k", "keygen", "Keygen"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -406,6 +515,7 @@ class MatrixTui(App):
         peers: PeerClient | None = None,
         local_id: str | None = None,
         book: ClientBook | None = None,
+        home: str = "~/.matrix",  # keys and genesis of this laptop (`matrix up --home`)
     ):
         super().__init__()
         self.g, self.local = g, local
@@ -421,6 +531,8 @@ class MatrixTui(App):
         self.evidence: list[dict] = []
         self.peers = peers  # tests inject a fake; otherwise created on mount
         self._busy = False
+        self._job: str | None = None  # one form job at a time: output capture is process-wide
+        self.home = os.path.expanduser(home)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dashboard"):
@@ -488,6 +600,121 @@ class MatrixTui(App):
             await poll_log(self.peers, self.node_id, self.detail_id) if self.show_log else ""
         )
         self.render_view()
+
+    # jobs: the same code as `matrix release`, `verify` and `keygen`, with their output captured
+
+    def _form(
+        self, title: str, fields: list[tuple[str, str, str]], required: set[str], job
+    ) -> None:
+        if self._job is not None:
+            self.notify(f"{self._job} is still running", severity="warning")
+            return
+
+        def start(values: dict[str, str] | None) -> None:
+            if values is not None:
+                self._job = title
+                self.run_worker(self._run_job(title, job, values), exclusive=False)
+
+        self.push_screen(FormScreen(title, fields, required), start)
+
+    async def _run_job(self, title: str, job, values: dict[str, str]) -> None:
+        buf = io.StringIO()
+        rc: int | None = None
+        self.notify(f"{title}: started")
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = await job(values)
+        except Exception as e:  # noqa: BLE001  a failed job is shown, never a crash
+            buf.write(f"unexpected error: {e!r}\n")
+        finally:
+            self._job = None
+        self.push_screen(
+            ResultScreen(f"{title} · exit {rc}", buf.getvalue().strip() or "(no output)", rc == 0)
+        )
+
+    def action_release(self) -> None:
+        repo = self.g.allowed_repos[0] if self.g.allowed_repos else ""
+        self._form(
+            "matrix release",
+            [
+                ("repo", "repo URL", repo),
+                ("tag", "tag (each tag can be released once)", ""),
+                ("commit", "commit (40 hex, the commit the tag points to)", ""),
+                ("key", "release key file", os.path.join(self.home, "keys", "release.key")),
+                ("wait", "give up with PENDING after (seconds)", "600"),
+                ("out", "write the binary and certificate to", "dist"),
+                ("output", "binary file name (blank: the repo name)", ""),
+            ],
+            {"repo", "tag", "commit", "key", "wait", "out"},
+            self._job_release,
+        )
+
+    async def _job_release(self, v: dict[str, str]) -> int:
+        if not v["wait"].isdigit():
+            print("matrix: wait must be a number of seconds", file=sys.stderr)
+            return EXIT_ERROR
+        a = argparse.Namespace(
+            repo=v["repo"],
+            tag=v["tag"],
+            commit=v["commit"],
+            key=os.path.expanduser(v["key"]),
+            wait=int(v["wait"]),
+            out=os.path.expanduser(v["out"]),
+            output=v["output"] or None,
+        )
+        return await release_job(a, self.g, self.local)
+
+    def action_verify(self) -> None:
+        repo = self.g.allowed_repos[0] if self.g.allowed_repos else ""
+        self._form(
+            "matrix verify (offline)",
+            [
+                ("file", "the binary to check", "dist/"),
+                ("cert", "its .matrix.json certificate", "dist/"),
+                ("repo", "the repo you expect", repo),
+                ("tag", "the tag you expect", ""),
+                ("commit", "also require this commit (optional)", ""),
+                ("pin", "pinned genesis hash (blank: genesis.sha256 in the home dir)", ""),
+            ],
+            {"file", "cert", "repo", "tag"},
+            self._job_verify,
+        )
+
+    async def _job_verify(self, v: dict[str, str]) -> int:
+        a = argparse.Namespace(
+            file=os.path.expanduser(v["file"]),
+            cert=os.path.expanduser(v["cert"]),
+            repo=v["repo"],
+            tag=v["tag"],
+            commit=v["commit"] or None,
+            genesis=os.path.join(self.home, "genesis.json"),
+            genesis_sha256=v["pin"] or self._home_pin(),
+        )
+        return cmd_verify(a)
+
+    def _home_pin(self) -> str | None:
+        try:
+            with open(os.path.join(self.home, "genesis.sha256"), encoding="ascii") as f:
+                return f.read().strip()
+        except OSError:
+            return None  # cmd_verify then says there is no pinned hash
+
+    def action_keygen(self) -> None:
+        self._form(
+            "matrix keygen",
+            [
+                (
+                    "out",
+                    "where to write the private key (0600; public key shown)",
+                    os.path.join(self.home, "keys", "extra.key"),
+                )
+            ],
+            {"out"},
+            self._job_keygen,
+        )
+
+    async def _job_keygen(self, v: dict[str, str]) -> int:
+        return cmd_keygen(argparse.Namespace(out=os.path.expanduser(v["out"])))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id != "table":

@@ -753,8 +753,11 @@ matrix verify hello --cert hello.matrix.json \
 | **Releases** | ID (short), `repo@tag`, phase, attestations x/R, quorum progress x/T, verdict | `r`, `Enter` for detail |
 | **Detail** | Per builder: attested result, matches quorum? (green/red), build log tail (the laptop's own builder only: the log endpoint answers loopback callers only) | `l` for log |
 | **Evidence** | Kind, signer, release, time; `Enter` shows the proof JSON | `e` |
+| **Release form** | Every `matrix release` option as a field (repo, tag, commit, key, wait, out, output); runs the same code, then shows its output and exit code. The Releases screen shows it live | `n` |
+| **Verify form** | Every `matrix verify` option as a field; offline; shows the result and exit code | `v` |
+| **Keygen form** | `matrix keygen --out`; shows the public key | `k` |
 
-The TUI polls the local builder's API every second, including `/v1/peers` for the Builders screen, and verifies every hello against genesis before showing it. It reads no database and holds no state of its own.
+The TUI polls the local builder's API every second, including `/v1/peers` for the Builders screen, and verifies every hello against genesis before showing it. It reads no database and holds no state of its own. The forms start the same functions as the CLI (G7) and keep no state either; one runs at a time. `status` and `evidence` are the Detail and Evidence screens; `up` options change the builder process and stay on the command line.
 
 ### 7.13 Transport: plain LAN, optional tinc
 
