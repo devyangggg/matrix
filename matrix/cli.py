@@ -1370,7 +1370,22 @@ async def _node_and_tui(
             "unless every laptop resets at the same time."
         )
 
-    app = MatrixTui(g, local, home=home, on_reset=reset)
+    async def leave() -> str:
+        """Leave this network: stop the builder and move genesis, pin, endorsements and data
+        into old-<short code>/ (keys stay), so the next `matrix up` founds a network afresh."""
+        state["resetting"] = True  # the builder ending is by design; never cleared
+        old = state["task"]
+        old.cancel()
+        await asyncio.gather(old, return_exceptions=True)
+        dest = _archive(Path(home).expanduser())
+        state["left"] = (
+            f"Left the network. Its files are in {dest}; your keys are kept.\n"
+            "The other laptops still list you as an offline member: membership is fixed by "
+            "genesis, so removing you needs a new network (`matrix up --refound` on all of them)."
+        )
+        return state["left"]
+
+    app = MatrixTui(g, local, home=home, on_reset=reset, on_leave=leave)
     tui_task = asyncio.create_task(app.run_async())
     while True:
         done, _ = await asyncio.wait({state["task"], tui_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -1387,6 +1402,9 @@ async def _node_and_tui(
         tui_task.result()
     except Exception as e:  # noqa: BLE001  a dashboard crash must not stop the builder
         _err(f"dashboard stopped: {e!r}")
+    if "left" in state:
+        _out(state["left"])
+        return
     _out(
         "Dashboard closed; the builder keeps running here (Ctrl-C to stop; `matrix tui` reopens it)."
     )
@@ -1605,7 +1623,8 @@ def _parser() -> argparse.ArgumentParser:
         "Full-screen live view of the network through this laptop's builder. Keys: b builders,\n"
         "r releases, Enter detail, l log (this laptop's builder only), e evidence, n new release,\n"
         "v verify, k keygen (forms that run `matrix release`, `verify` and `keygen`),\n"
-        "x reset this laptop's builder data (only in the dashboard `matrix up` opens), q quit.",
+        "x reset this laptop's builder data, L leave the network (both only in the dashboard\n"
+        "`matrix up` opens), q quit.",
         "  matrix tui",
         "0 on quit, 4 error",
     )

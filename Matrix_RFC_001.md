@@ -759,6 +759,7 @@ matrix verify hello --cert hello.matrix.json \
 | **Verify form** | Every `matrix verify` option as a field; offline; shows the result and exit code | `v` |
 | **Keygen form** | `matrix keygen --out`; shows the public key | `k` |
 | **Reset** | Type `RESET` to stop this laptop's builder, delete its data dir (requests, attestations, logs, artifacts; keys and genesis stay) and start it again. Only in the dashboard that `matrix up` opens. Peers keep their copies and sync them back unless every laptop resets | `x` |
+| **Leave** | Type `LEAVE` to stop this laptop's builder and move genesis, pin, endorsements and data to `old-<short code>/` (keys stay), then close the dashboard. Local only: genesis is unchanged, so the others still list this laptop as an offline member (disconnect is not leave, §8.3); removing it for good needs a new network (`--refound`) | `L` |
 
 The TUI polls the local builder's API every second, including `/v1/peers` for the Builders screen, and verifies every hello against genesis before showing it. It reads no database and holds no state of its own. The forms start the same functions as the CLI (G7) and keep no state either; one runs at a time. `status` and `evidence` are the Detail and Evidence screens; `up` options change the builder process and stay on the command line.
 

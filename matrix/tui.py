@@ -506,6 +506,7 @@ class MatrixTui(App):
         Binding("v", "verify", "Verify"),
         Binding("k", "keygen", "Keygen"),
         Binding("x", "reset", "Reset"),
+        Binding("L", "leave", "Leave network"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -518,6 +519,7 @@ class MatrixTui(App):
         book: ClientBook | None = None,
         home: str = "~/.matrix",  # keys and genesis of this laptop (`matrix up --home`)
         on_reset=None,  # async () -> str, set when the builder runs in this process
+        on_leave=None,  # async () -> str, same
     ):
         super().__init__()
         self.g, self.local = g, local
@@ -536,6 +538,8 @@ class MatrixTui(App):
         self._job: str | None = None  # one form job at a time: output capture is process-wide
         self.home = os.path.expanduser(home)
         self.on_reset = on_reset
+        self.on_leave = on_leave
+        self._exit_after_result = False  # leaving the network ends the dashboard
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dashboard"):
@@ -631,8 +635,10 @@ class MatrixTui(App):
             buf.write(f"unexpected error: {e!r}\n")
         finally:
             self._job = None
+        done = self.exit if self._exit_after_result else None
         self.push_screen(
-            ResultScreen(f"{title} · exit {rc}", buf.getvalue().strip() or "(no output)", rc == 0)
+            ResultScreen(f"{title} · exit {rc}", buf.getvalue().strip() or "(no output)", rc == 0),
+            (lambda _: done()) if done else None,
         )
 
     def action_release(self) -> None:
@@ -701,6 +707,37 @@ class MatrixTui(App):
                 return f.read().strip()
         except OSError:
             return None  # cmd_verify then says there is no pinned hash
+
+    def action_leave(self) -> None:
+        if self.on_leave is None:
+            self.notify(
+                "leaving needs the dashboard that `matrix up` opens: it stops the builder",
+                severity="warning",
+            )
+            return
+        self._form(
+            "leave the network",
+            [
+                (
+                    "confirm",
+                    (
+                        "type LEAVE to stop this builder and move this network's files away "
+                        "(keys stay). The others keep you listed as an offline member"
+                    ),
+                    "",
+                )
+            ],
+            {"confirm"},
+            self._job_leave,
+        )
+
+    async def _job_leave(self, v: dict[str, str]) -> int:
+        if v["confirm"] != "LEAVE":
+            print("matrix: not confirmed (type LEAVE): nothing changed", file=sys.stderr)
+            return EXIT_ERROR
+        print(await self.on_leave())
+        self._exit_after_result = True
+        return 0
 
     def action_reset(self) -> None:
         if self.on_reset is None:

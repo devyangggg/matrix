@@ -454,3 +454,26 @@ async def test_reset_is_refused_without_a_builder_in_process(peers, genesis):
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.press("x")
         assert not isinstance(app.screen, tui.FormScreen)
+
+
+async def test_leave_needs_the_typed_confirmation_and_closes_the_dashboard(peers, genesis):
+    calls = []
+
+    async def leave():
+        calls.append(1)
+        return "left"
+
+    app = MatrixTui(genesis, LOCAL, peers=peers, local_id="builder1", on_leave=leave)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("L")
+        await _fill(app, pilot, confirm="leave")  # wrong case
+        await pilot.pause(0.2)
+        assert calls == [] and app._exit_after_result is False
+        await pilot.press("escape")
+        await pilot.press("L")
+        await _fill(app, pilot, confirm="LEAVE")
+        await pilot.pause(0.2)
+        assert calls == [1] and app._exit_after_result is True
+        await pilot.press("escape")  # closing the result ends the dashboard
+        await pilot.pause(0.2)
+    assert app.return_code in (0, None)

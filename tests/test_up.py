@@ -34,9 +34,10 @@ def fake_tui(monkeypatch):
     apps = []
 
     class FakeApp:
-        def __init__(self, g, local, home=None, on_reset=None):
+        def __init__(self, g, local, home=None, on_reset=None, on_leave=None):
             self.quit = asyncio.Event()
             self.on_reset = on_reset
+            self.on_leave = on_leave
             apps.append(self)
 
         async def run_async(self):
@@ -725,3 +726,26 @@ async def test_reset_wipes_the_data_dir_and_restarts_the_builder(fake_tui, tmp_p
     assert not fake_tui[0].quit.is_set()
     node.stop.set()
     await asyncio.wait_for(task, 1)
+
+
+async def test_leave_archives_the_network_and_ends_the_dashboard(fake_tui, tmp_path, capsys):
+    home = tmp_path / "home"
+    (home / "keys").mkdir(parents=True)
+    (home / "keys" / "node.key").write_text("k")
+    (home / "data").mkdir()
+    for f in ("genesis.json", "genesis.sha256", "endorsements.json"):
+        (home / f).write_text("x")
+    node = FakeNode()
+    args = argparse.Namespace(data=str(home / "data"))
+    task = asyncio.create_task(cli._node_and_tui(node, args, None, "127.0.0.1:7700", str(home)))
+    await asyncio.sleep(0.05)
+    message = await fake_tui[0].on_leave()
+    assert "offline member" in message
+    [old] = list(home.glob("old-*"))
+    assert (old / "genesis.json").exists() and (old / "data").is_dir()
+    assert not (home / "genesis.json").exists() and (home / "keys" / "node.key").exists()
+    await asyncio.sleep(0.15)
+    assert not task.done()  # the builder stopping did not look like a crash
+    fake_tui[0].quit.set()  # the dashboard closes after the result is read
+    await asyncio.wait_for(task, 1)
+    assert "Left the network" in capsys.readouterr().out
