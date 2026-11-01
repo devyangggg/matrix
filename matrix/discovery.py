@@ -151,6 +151,8 @@ def parse_hello(data: Any, g: Genesis, last_seq: Mapping[str, int] | None = None
     return _check_hello(data, g, last_seq)[0]
 
 
+_last_targets: list[str] = []  # logged only when the interfaces change, not on every send
+
 _SIOCGIFBRDADDR = {"linux": 0x8919, "darwin": 0xC0206923}
 
 
@@ -174,7 +176,9 @@ def broadcast_targets() -> list[str]:
             ip = socket.inet_ntoa(res[20:24])  # sockaddr_in.sin_addr inside struct ifreq
             if ip != "0.0.0.0" and ip not in out:
                 out.append(ip)
-    log.debug("broadcast targets: %s", out)
+    if out != _last_targets:
+        log.debug("broadcast targets: %s", out)
+        _last_targets[:] = out
     return out
 
 
@@ -261,7 +265,8 @@ class Datagrams(asyncio.DatagramProtocol):
         self.on_datagram = on_datagram
 
     def datagram_received(self, data: bytes, addr) -> None:
-        log.debug("udp rx %d bytes from %s:%d", len(data), addr[0], addr[1])
+        # no per-packet log here: the handlers log what a datagram meant, and one line per
+        # datagram (own echoes arrive once per interface) buried the prompt in --verbose
         try:
             self.on_datagram(data, addr)
         except Exception:  # a callback never takes the listener down
@@ -308,7 +313,6 @@ class Discovery:
         try:
             if self.transport is not None:
                 self.transport.sendto(data, dest)
-                log.debug("udp tx %d bytes to %s:%d", len(data), *dest)
         except OSError as e:  # Wi-Fi off, no route: retried next round
             log.debug("%s hello.send_failed %s", self.me.id, e)
 
@@ -316,8 +320,9 @@ class Discovery:
         seq = max(int(self.clock() * 1000), self.last_sent + 1)  # receivers drop repeated seqs
         self.last_sent = seq
         self.last = make_hello(self.g, self.me, self.sk, self.addr, seq)
-        log.debug("%s hello.send addr=%s seq=%d", self.me.id, self.addr, seq)
-        for dest in broadcast_targets():
+        targets = broadcast_targets()
+        log.debug("%s hello.send addr=%s seq=%d to %s", self.me.id, self.addr, seq, targets)
+        for dest in targets:
             self._send(self.last, (dest, self.port))
         self.book.update(Hello(self.me.id, self.addr, seq, loads_strict(self.last)))
         now = self.clock()

@@ -638,12 +638,14 @@ class UdpBus:
         )
 
     def send(self, data: bytes) -> None:
+        sent = []
         for dest in broadcast_targets():
             try:
                 self.transport.sendto(data, (dest, self.port))
-                log.debug("udp tx %d bytes to %s:%d", len(data), dest, self.port)
+                sent.append(dest)
             except OSError as e:  # no network right now: the next round retries
                 log.debug("udp tx to %s failed: %s", dest, e)
+        log.debug("udp tx %d bytes to %s", len(data), sent)
 
     def close(self) -> None:
         if self.transport is not None:
@@ -796,13 +798,8 @@ async def ceremony(
                     )
             own_echo = f.pubkey == me_pub
             rx["own" if own_echo else "others"] += 1
-            log.debug(
-                "ceremony: founder %s (%s) from %s%s",
-                f.id,
-                f.pubkey[:8],
-                src[0],
-                " [own echo]" if own_echo else "",
-            )
+            if not own_echo:  # our own echoes arrive once per interface: counted, not logged
+                log.debug("ceremony: founder %s (%s) from %s", f.id, f.pubkey[:8], src[0])
             if prev is None or (prev.id, prev.params_hash) != (f.id, f.params_hash):
                 show(f)
                 review()  # a proposal may have been waiting for exactly this founder
@@ -810,10 +807,10 @@ async def ceremony(
         s = parse_seal(data, nid)
         if s is not None:
             rx["own" if s.signer == me_pub else "others"] += 1
-            log.debug(
-                "ceremony: seal by %s for %s from %s", s.signer[:8], s.genesis_hash[:8], src[0]
-            )
             if s.signer != me_pub:
+                log.debug(
+                    "ceremony: seal by %s for %s from %s", s.signer[:8], s.genesis_hash[:8], src[0]
+                )
                 proposals.pop(s.signer, None)  # newest last, so `y` takes the latest
                 proposals[s.signer] = s
                 review()
@@ -922,11 +919,15 @@ async def ceremony(
             bus.send(proposal)
             drain()  # an extra Enter pressed while proposing must not answer the y/N question
             _out("The others are asked to accept it. Read the short code aloud. Confirm? [y/N]")
-            answer = await ask("confirm")
+            answer = ""
+            while not answer.strip():  # a stray Enter is not an answer: only y or n are
+                answer = await ask("confirm")
+                if not answer:
+                    _err("stdin closed: the ceremony needs a terminal")
+                    return None
+                if not answer.strip():
+                    _out("Type y to confirm, or n to withdraw the proposal.")
             log.info("ceremony: short code answer %r", answer.strip())
-            if not answer:
-                _err("stdin closed: the ceremony needs a terminal")
-                return None
             if answer.strip().lower() == "y":
                 break
             sending.remove(proposal)  # withdrawn: back to listening, or accept another proposal

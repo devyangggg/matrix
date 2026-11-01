@@ -605,7 +605,7 @@ async def test_extra_enter_does_not_answer_the_confirmation():
     assert all(r is not None for r in results)
 
 
-async def test_without_drain_a_stale_enter_aborts_the_ceremony():
-    # the bug the drain fixes: the stale "\n" answered y/N, laptop-a aborted, the others waited
+async def test_a_stray_enter_is_not_an_answer_to_the_confirmation():
+    # even without drain: the blank line is asked again, it neither confirms nor withdraws
     results = await _found_with_double_enter(drain_a=False)
-    assert results == [None, None, None, None]
+    assert all(r is not None for r in results)
