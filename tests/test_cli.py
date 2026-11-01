@@ -609,3 +609,28 @@ def test_every_command_keeps_its_option_names():
         (["keygen", "--out", "k"], cli.cmd_keygen),
     ):
         assert p.parse_args(argv).fn is fn
+
+
+def test_release_waits_for_more_than_half_of_the_builders_that_are_online(net, capsys):
+    # 8 builders online: the genesis threshold (3) is met by 3 matching votes, but half of 8 is 4
+    # and the bar is 5, so no certificate is written.
+    addrs = net.found_without_addresses()
+    net.serve_peers("builder1", _hellos(net, addrs))
+    net.attest(dict.fromkeys(["builder1", "builder3", "builder5"], H))
+    net.serve("builder1")
+    assert net.release("--wait", "1", node=addrs["builder1"]) == 3
+    out = capsys.readouterr().out
+    assert "3 of 8 online builders agree" in out and "need 5" in out
+    assert not (net.tmp / "dist").exists()
+
+
+def test_release_bar_never_drops_below_the_genesis_threshold(net):
+    # Only 3 builders online: more than half of them is 2, but the genesis threshold stays 3.
+    addrs = net.found_without_addresses()
+    online = ["builder1", "builder3", "builder5"]
+    net.serve_peers("builder1", _hellos(net, addrs, nodes=online))
+    net.attest(dict.fromkeys(online, H), on=online)
+    net.serve("builder1")
+    assert net.release(node=addrs["builder1"]) == 0
+    assert cli.release_required(net.g, 3) == 3 and cli.release_required(net.g, 0) == 3
+    assert cli.release_required(net.g, 8) == 5 and cli.release_required(net.g, 7) == 4

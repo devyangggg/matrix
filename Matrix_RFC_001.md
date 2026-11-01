@@ -232,6 +232,8 @@ Each laptop runs one builder process on port 7700 with its own Docker. All four 
 
 **Running.** Each builder broadcasts a signed hello every `HELLO_INTERVAL_S`; peers update their address books (§7.15). A builder that disconnects stays a member. When it returns, its newer hello updates its address everywhere and pull sync fetches what it missed.
 
+**Release bar (publisher side).** `matrix release` writes a certificate only when at least `max(f+1, online // 2 + 1)` builders signed the agreed hash, where `online` is the number of builders with a verified hello younger than `ONLINE_WINDOW_S` at that moment. The genesis threshold f+1 is always the floor, so knocking laptops offline never lowers the bar. `matrix verify` stays offline and checks f+1 (§7.7): "online" is not signed, so it is not part of what a certificate proves. If the agreed hash has too few signers, `release` keeps waiting and ends `PENDING` (exit 3).
+
 **Releasing:**
 
 ```mermaid

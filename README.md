@@ -124,6 +124,9 @@ Add `-v` / `--verbose` to any command to log every step (UDP packets, HTTP calls
 and this laptop's live build output) to stderr. With `-v`, `matrix up` keeps the logs on the console
 instead of opening the dashboard. `matrix tui -v` writes to `~/.matrix/verbose.log`.
 
+`matrix release` also waits until more than half of the builders that are online agree (at least f+1),
+so with all 4 laptops up it needs 3; `matrix verify` checks the f+1 in genesis, offline.
+
 Exit codes: `0` certified / reproduced, `1` mismatch, `2` invalid certificate or not
 reproducible, `3` pending, `4` error, `5` build failed.
 

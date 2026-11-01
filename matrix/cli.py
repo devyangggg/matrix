@@ -442,6 +442,14 @@ async def release_job(a: argparse.Namespace, g: Genesis, local: str) -> int:
     return await _release(a, g, sk, local)
 
 
+def release_required(g: Genesis, online: int) -> int:
+    """Matching attestations `matrix release` insists on before it writes a certificate: the
+    genesis threshold f+1, or more than half of the builders online now if that is larger. It only
+    ever raises the bar, so taking laptops offline cannot lower it below f+1. `matrix verify`
+    stays offline and checks the genesis threshold only: "online" is not signed."""
+    return max(g.threshold, online // 2 + 1)
+
+
 async def _release(a: argparse.Namespace, g: Genesis, sk: Any, local: str) -> int:
     pub = pubkey_hex(sk)
     signer = next((s for s in g.release_signers if s.pubkey == pub), None)
@@ -483,16 +491,24 @@ async def _release(a: argparse.Namespace, g: Genesis, sk: Any, local: str) -> in
             union, answered = await collect(peers, g, rid)
             ever |= answered
             v = verdict(env, union.values(), g)  # our own signed request, never a peer's
+            online = len(_online(g, book))
+            need = release_required(g, online)
+            agree = sum(r == v.hash for r in v.results.values()) if v.state == "AGREED" else 0
+            enough = v.state == "AGREED" and agree >= need
             log.info(
-                "release: poll: %d builders answered, %d attestations, verdict %s",
+                "release: poll: %d builders answered, %d attestations, verdict %s, "
+                "%d agree, need %d (%d online)",
                 len(answered),
                 len(union),
                 v.state,
+                agree,
+                need,
+                online,
             )
-            if v.state == "AGREED" and (got is None or got[0] != v.hash):
+            if enough and (got is None or got[0] != v.hash):
                 data = await _download(peers, v)
                 got = (v.hash, data) if data is not None else None
-            settled = v.state != "PENDING" and (v.state != "AGREED" or got is not None)
+            settled = v.state != "PENDING" and (v.state != "AGREED" or (enough and got is not None))
             if (settled and len(ever) > g.f) or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(RELEASE_POLL_S)
@@ -503,7 +519,7 @@ async def _release(a: argparse.Namespace, g: Genesis, sk: Any, local: str) -> in
     if len(ever) <= g.f:
         _err(f"only {len(ever)} builders answered; need at least {g.f + 1}")
         return EXIT_ERROR
-    if v.state == "AGREED" and got is not None:
+    if v.state == "AGREED" and enough and got is not None:
         cert = {
             "v": 1,
             "genesis_hash": g.hash,
@@ -526,6 +542,12 @@ async def _release(a: argparse.Namespace, g: Genesis, sk: Any, local: str) -> in
             _out("WARNING: some builders disagree with the certified hash (reproducibility)")
         _out(f"CERTIFIED {v.hash} -> {out / name}")
         return EXIT_OK
+    if v.state == "AGREED" and not enough:
+        _out(
+            f"PENDING: {agree} of {online} online builders agree on {v.hash}; "
+            f"need {need} (the genesis threshold {g.threshold}, or more than half of those online)"
+        )
+        return EXIT_PENDING
     if v.state == "AGREED":
         _out("PENDING: no builder served an artifact matching the certified hash")
         return EXIT_PENDING
