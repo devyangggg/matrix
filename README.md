@@ -13,7 +13,7 @@ deterministic, so the network does not have to *agree* on an answer; it only cou
 signed answers. Consumers check the resulting certificate offline.
 
 <p align="center">
-  <img src="docs/img/hero.png" alt="The Matrix dashboard showing builders and a certified release" width="800">
+<img width="1292" height="625" alt="image" src="https://github.com/user-attachments/assets/0f9d46df-3264-44c3-9e60-56f00f5a1fc6" />
 </p>
 
 ## Features
@@ -31,11 +31,6 @@ signed answers. Consumers check the resulting certificate offline.
   hashed `genesis.json`.
 - **Terminal dashboard.** Watch builders and releases live; start releases, verify binaries and
   generate keys from forms.
-
-<p align="center">
-  <img src="docs/img/ceremony.png" alt="matrix up: founders appear and the short code is compared" width="400">
-  <img src="docs/img/certified.png" alt="matrix release: CERTIFIED with per-builder results" width="400">
-</p>
 
 ## How it works
 
@@ -146,7 +141,7 @@ genesis threshold offline.
 ### Dashboard
 
 <p align="center">
-  <img src="docs/img/tui-builders.png" alt="Dashboard builders view: address, online state, last seen" width="720">
+  <img width="1920" height="980" alt="image" src="https://github.com/user-attachments/assets/d93b4941-ccab-4384-b922-07fdaf34ece5" />
 </p>
 
 | Key | Action |
