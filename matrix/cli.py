@@ -21,7 +21,6 @@ from .builder import MAX_ARTIFACT, isolation  # one artifact limit for building 
 from .canon import canonical_json, loads_strict
 from .crypto import keygen, load_key, pubkey_hex
 from .discovery import (
-    BROADCAST,
     CEREMONY_TIMEOUT_S,
     DISCOVERY_PORT,
     FOUNDER_INTERVAL_S,
@@ -31,6 +30,7 @@ from .discovery import (
     Endorse,
     Founder,
     NetworkError,
+    broadcast_targets,
     ceremony_genesis,
     check_endorsements,
     default_name,
@@ -635,11 +635,12 @@ class UdpBus:
         )
 
     def send(self, data: bytes) -> None:
-        try:
-            self.transport.sendto(data, (BROADCAST, self.port))
-            log.debug("udp tx %d bytes to %s:%d", len(data), BROADCAST, self.port)
-        except OSError as e:
-            log.debug("udp tx failed: %s (no network? retried next round)", e)  # next round retries
+        for dest in broadcast_targets():
+            try:
+                self.transport.sendto(data, (dest, self.port))
+                log.debug("udp tx %d bytes to %s:%d", len(data), dest, self.port)
+            except OSError as e:  # no network right now: the next round retries
+                log.debug("udp tx to %s failed: %s", dest, e)
 
     def close(self) -> None:
         if self.transport is not None:
@@ -792,6 +793,11 @@ async def ceremony(
         for n in g.nodes:
             _out(f"  {n.id:<24} {n.pubkey[:8]}")
         _out(f"Short code: {short_code(g.hash)}")
+        if g.f == 0:
+            _out(
+                f"WARNING: {len(fs)} founders give f=0: ONE builder alone certifies a release, "
+                "so no builder can be a faulty or malicious one. Use 4 or more laptops for f=1."
+            )
         drain()  # an extra Enter pressed while sealing must not answer the y/N question
         _out("Read it aloud. Do all screens show this code and this list? [y/N]")
         answer = (await ask("confirm")).strip().lower()
@@ -905,13 +911,14 @@ async def _keep_endorsing(data: bytes, seconds: float) -> None:
     with udp_socket(None) as sock:
         end = loop.time() + seconds
         while loop.time() < end:
-            try:
-                sock.sendto(data, (BROADCAST, DISCOVERY_PORT))
-                log.debug(
-                    "late endorse: udp tx %d bytes to %s:%d", len(data), BROADCAST, DISCOVERY_PORT
-                )
-            except OSError as e:
-                log.debug("late endorse: udp tx failed: %s", e)
+            for dest in broadcast_targets():
+                try:
+                    sock.sendto(data, (dest, DISCOVERY_PORT))
+                    log.debug(
+                        "late endorse: udp tx %d bytes to %s:%d", len(data), dest, DISCOVERY_PORT
+                    )
+                except OSError as e:
+                    log.debug("late endorse: udp tx to %s failed: %s", dest, e)
             await asyncio.sleep(FOUNDER_INTERVAL_S)
 
 
@@ -1008,9 +1015,9 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
             return EXIT_ERROR
         ip = local_ip()
         log.info(
-            "up: LAN address %s; founders are broadcast to %s:%d (UDP)",
+            "up: LAN address %s; founders are broadcast to %s (UDP %d)",
             ip,
-            BROADCAST,
+            broadcast_targets(),
             DISCOVERY_PORT,
         )
         try:

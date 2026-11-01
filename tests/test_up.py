@@ -129,7 +129,30 @@ async def test_rogue_seen_by_one_laptop_aborts_everyone(capsys):
     assert "sealed a different genesis" in capsys.readouterr().err
 
 
-async def test_seal_waits_for_four_and_matching_network_toml(capsys):
+async def test_two_laptops_found_a_network_without_fault_tolerance(capsys):
+    hub = Hub()
+    results = await asyncio.gather(
+        *(
+            cli.ceremony(
+                PARAMS,
+                name,
+                node_key(name),
+                release_key(name),
+                MemBus(hub, i),
+                answers(),
+                timeout=5.0,
+                interval=0.01,
+            )
+            for i, name in enumerate(NAMES[:2])
+        )
+    )
+    assert all(r is not None for r in results)
+    g = parse_genesis(results[0][0])
+    assert (g.f, g.replicas, g.threshold, len(g.nodes)) == (0, 2, 1, 2)
+    assert "WARNING: 2 founders give f=0" in capsys.readouterr().out
+
+
+async def test_seal_waits_for_matching_network_toml(capsys):
     hub = Hub()
     other = {**PARAMS, "build_timeout_s": 46}
     hub.extra[0] = [d.make_founder(other, "laptop-x", node_key("x"), release_key("x"))]
@@ -149,7 +172,9 @@ async def test_seal_waits_for_four_and_matching_network_toml(capsys):
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     out = capsys.readouterr().out
-    assert "params MISMATCH" in out and "cannot seal yet: need at least 4 founders" in out
+    assert (
+        "params MISMATCH" in out and "cannot seal yet: different network.toml on: laptop-x" in out
+    )
     assert hub.buses == []  # the bus is closed even when cancelled
 
 

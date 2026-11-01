@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 import socket
+import struct
 import sys
 import time
 import tomllib
@@ -146,6 +147,33 @@ def _check_hello(
 
 def parse_hello(data: Any, g: Genesis, last_seq: Mapping[str, int] | None = None) -> Hello | None:
     return _check_hello(data, g, last_seq)[0]
+
+
+_SIOCGIFBRDADDR = {"linux": 0x8919, "darwin": 0xC0206923}
+
+
+def broadcast_targets() -> list[str]:
+    """255.255.255.255 plus each interface's own broadcast address (e.g. 172.16.223.255).
+
+    The limited broadcast leaves through the default route only, and some networks drop it but
+    forward the directed one. Linux and macOS (ioctl); elsewhere only the limited broadcast."""
+    out = [BROADCAST]
+    req = _SIOCGIFBRDADDR.get(sys.platform)
+    if req is None:
+        return out
+    import fcntl
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        for _, name in socket.if_nameindex():
+            try:
+                res = fcntl.ioctl(s.fileno(), req, struct.pack("256s", name.encode()[:15]))
+            except OSError:
+                continue  # no broadcast address: loopback, tunnels
+            ip = socket.inet_ntoa(res[20:24])  # sockaddr_in.sin_addr inside struct ifreq
+            if ip != "0.0.0.0" and ip not in out:
+                out.append(ip)
+    log.debug("broadcast targets: %s", out)
+    return out
 
 
 def local_ip() -> str | None:
@@ -287,7 +315,8 @@ class Discovery:
         self.last_sent = seq
         self.last = make_hello(self.g, self.me, self.sk, self.addr, seq)
         log.debug("%s hello.send addr=%s seq=%d", self.me.id, self.addr, seq)
-        self._send(self.last, (BROADCAST, self.port))
+        for dest in broadcast_targets():
+            self._send(self.last, (dest, self.port))
         self.book.update(Hello(self.me.id, self.addr, seq, loads_strict(self.last)))
         now = self.clock()
         state = {
@@ -502,8 +531,8 @@ def ceremony_genesis(params: dict, founders: Sequence[Founder]) -> dict:
 
 def seal_problem(params: dict, founders: Sequence[Founder], me_pubkey: str) -> str | None:
     """Why the seal must wait, or None."""
-    if len(founders) < 4:
-        return f"need at least 4 founders, have {len(founders)}"
+    if len(founders) < 2:
+        return f"need at least 2 founders, have {len(founders)}"
     ids = [x.id for x in founders]
     dup = sorted({i for i in ids if ids.count(i) > 1})
     if dup:

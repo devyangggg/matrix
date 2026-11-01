@@ -32,7 +32,7 @@ def _three_on_one_operator(raw):
 BAD = {
     "extra key": _set(["extra"], 1),
     "missing key": _del("nodes"),
-    "f zero": _set(["f"], 0),
+    "f negative": _set(["f"], -1),
     "f bool": _set(["f"], True),
     "f float": _set(["f"], 2.0),
     "n < 4f": _short_nodes,

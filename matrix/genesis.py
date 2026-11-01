@@ -90,8 +90,9 @@ def _dict_list(raw: dict, key: str, *allowed: set[str]) -> list[dict]:
 def parse_genesis(raw: dict) -> Genesis:
     _need(isinstance(raw, dict), "genesis must be a JSON object")
     _need(set(raw) == _KEYS, f"genesis keys must be exactly {sorted(_KEYS)}")
-    for k in _INTS:
-        _need(type(raw[k]) is int and raw[k] > 0, f"{k} must be a positive integer")
+    for k in _INTS:  # f = 0 is allowed: a 2 or 3 laptop network has no fault tolerance
+        low = 0 if k == "f" else 1
+        _need(type(raw[k]) is int and raw[k] >= low, f"{k} must be an integer >= {low}")
     _need(_match(_NAME, raw["network_id"]), "network_id is invalid")
 
     repos = _str_list(raw, "allowed_repos", _REPO)
@@ -131,7 +132,8 @@ def parse_genesis(raw: dict) -> Genesis:
     _need(raw["threshold"] == f + 1, "threshold must equal f+1")
     _need(raw["build_timeout_s"] < raw["request_ttl_s"], "build_timeout_s must be < request_ttl_s")
     per_op = Counter(n.operator for n in nodes)
-    _need(max(per_op.values()) <= f, "no operator may run more than f nodes")
+    # With f = 0 (no fault tolerance) every operator still runs its one node.
+    _need(max(per_op.values()) <= max(f, 1), "no operator may run more than f nodes")
 
     return Genesis(
         network_id=raw["network_id"],

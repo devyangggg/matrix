@@ -211,7 +211,9 @@ What happens:
    ```
 
 3. **Seal.** When exactly the expected laptops are listed, press **Enter** on each laptop. Seal is
-   refused with fewer than 4 founders, duplicate names or any parameter mismatch. Every laptop
+   refused with fewer than 2 founders, duplicate names or any parameter mismatch. With 2 or 3
+   founders f = 0: one builder alone certifies, so use them for testing only; the demo needs 4.
+   Every laptop
    then builds the same genesis (nodes and release signers sorted by public key, no addresses,
    f = n // 4, replicas = n, threshold = f + 1) and shows its **short code**, the first 16 hex
    characters of the genesis hash:
@@ -328,7 +330,7 @@ the API off the LAN.
 |---|---|
 | Founders not appearing | Broadcast blocked: Windows firewall rules and profile `Private` (§2), Hyper-V rules `MatrixDiscovery`/`MatrixApi` missing (`Get-NetFirewallHyperVRule -VMCreatorId $wsl`), WSL not mirrored (`ip -4 addr` shows `172.x`), client isolation (§5 broadcast check). |
 | Short codes differ | Different founders seen (compare lists) or different `network.toml` (compare `git rev-parse HEAD`, `sha256sum network.toml`). Restart `matrix up` on all laptops. |
-| Seal refused | Fewer than 4 founders, a duplicate `--name`, or a params mismatch flag. |
+| Seal refused | Fewer than 2 founders, a duplicate `--name`, or a params mismatch flag. |
 | Ceremony aborted after 5 min | Not every laptop typed `y`, or endorsements do not arrive (UDP 7788). Nothing was written; run `matrix up` again. |
 | A builder offline in the TUI | Its hellos do not arrive: firewall (UDP 7788), Wi-Fi, or its node stopped. `curl -s http://127.0.0.1:7700/v1/peers` on another laptop shows its last hello. |
 | Online but builds never arrive | TCP 7700 blocked inbound on that laptop (§2, §3), or a wrong `--advertise`. |

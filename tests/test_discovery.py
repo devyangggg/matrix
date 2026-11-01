@@ -153,16 +153,27 @@ def make_discovery(genesis, keys, clock, me="builder1"):
     return disc, book
 
 
-def test_announce_broadcasts_and_lists_itself(genesis, keys, clock):
+def test_announce_broadcasts_to_every_target_and_lists_itself(genesis, keys, clock, monkeypatch):
+    monkeypatch.setattr(d, "broadcast_targets", lambda: [d.BROADCAST, "192.168.43.255"])
     disc, book = make_discovery(genesis, keys, clock)
     disc.announce()
     disc.announce()  # same clock: seq still increases, or receivers would drop it
-    (a, dest_a), (b, dest_b) = disc.transport.sent
-    assert dest_a == dest_b == (d.BROADCAST, d.DISCOVERY_PORT)
+    (a, dest_a), (a2, dest_a2), (b, dest_b), _ = disc.transport.sent
+    assert (dest_a, dest_a2) == (
+        (d.BROADCAST, d.DISCOVERY_PORT),
+        ("192.168.43.255", d.DISCOVERY_PORT),
+    )
+    assert a == a2 and dest_b == dest_a
     assert loads_strict(b)["body"]["seq"] == loads_strict(a)["body"]["seq"] + 1
     assert book.addr("builder1") == "192.168.43.10:7700"  # /v1/peers lists this node too
     other = d.AddressBook(genesis, clock)
     assert other.accept(a) is not None and other.accept(b) is not None
+
+
+def test_broadcast_targets_start_with_the_limited_broadcast():
+    t = d.broadcast_targets()
+    assert t[0] == d.BROADCAST and len(set(t)) == len(t)
+    assert all(d.valid_addr(f"{ip}:1") for ip in t)  # every entry is a dotted IPv4
 
 
 def test_new_peer_gets_a_unicast_reply_once(genesis, keys, clock):
@@ -300,7 +311,9 @@ def test_founder_signature_cannot_be_replayed_as_an_envelope(genesis):
 def test_seal_problems():
     fs = founders(4)
     me = fs[0].pubkey
-    assert d.seal_problem(PARAMS, fs[:3], me).startswith("need at least 4")
+    assert d.seal_problem(PARAMS, fs[:1], me).startswith("need at least 2")
+    assert d.seal_problem(PARAMS, fs[:2], me) is None  # 2 and 3 laptops may found (f = 0)
+    assert d.seal_problem(PARAMS, fs[:3], me) is None
     dup = d.parse_founder(
         d.make_founder(PARAMS, "laptop-a", node_key("x"), release_key("x")), "matrix-demo"
     )
@@ -322,6 +335,8 @@ def test_ceremony_genesis_is_deterministic_and_valid():
     assert sorted(s.id for s in g.release_signers) == [x + "-rel" for x in NAMES[:4]]
     g7 = parse_genesis(d.ceremony_genesis(PARAMS, founders(7)))
     assert (g7.f, g7.threshold) == (1, 2)
+    g2 = parse_genesis(d.ceremony_genesis(PARAMS, founders(2)))
+    assert (g2.f, g2.replicas, g2.threshold) == (0, 2, 1)
 
 
 def test_short_code():
