@@ -46,9 +46,9 @@ every tag has its own hash):
 | Tag | Scene | Honest hash | Backdoored hash (`backdoor.patch`) |
 |---|---|---|---|
 | `v1.2.0` | 2 (happy path), 5 (old certificate) | `H120 = e432bbc584446abcbd1493a1bf29918ac2e2eb59de76bf70ee130a1d093fd1f5` | |
-| `v1.2.1` | 3 (SolarWinds), 5 | `H121 = 1ddd637bbb7565d2bc773dd923ef6600ce95f8997bc53b66ce1244a46caaea65` (one builder so far) | `BAD121 = TBD` |
-| `v1.2.2` | 6 (laptop drops off) | `H122 = TBD` | |
-| `v1.2.3` | 7 (caught cheater) | `H123 = TBD` | |
+| `v1.2.1` | 3 (SolarWinds), 5 | `H121 = 1ddd637bbb7565d2bc773dd923ef6600ce95f8997bc53b66ce1244a46caaea65` | `BAD121 = 0e86e0174e00d105d88152d91022f63200c03ebd1aa695fcb0e94facdbe6204b` |
+| `v1.2.2` | 6 (laptop drops off) | `H122 = 8c6e6bf6a0b83664e636abb851b9d0197231077e72f76a8a1e1932cbc16d40d8` | |
+| `v1.2.3` | 7 (caught cheater) | `H123 = a2771b9ac98466d59e0a46d86d06ffb07aae6916f88b681cec3439360228d538` | |
 | `v1.2.4` | spare | `H124 = TBD` | `BAD124 = TBD` |
 | `v1.2.5` | spare | `H125 = TBD` | `BAD125 = TBD` |
 | `v0.9.0-broken` | optional extra | `BUILD_FAILED` (exit 5) | |

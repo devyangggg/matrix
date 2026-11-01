@@ -301,9 +301,9 @@ A tag can be released only once (`request_id` = hash of repo, commit and tag), s
 |---|---|---|
 | (none) | Scene 1: zero-config founding with `matrix up`; scene 4: imposter on the hotspot | 4 builders online; rogue messages rejected |
 | `v1.2.0` | Scene 2: happy path | `CERTIFIED`, hash `e432bbc584446abcbd1493a1bf29918ac2e2eb59de76bf70ee130a1d093fd1f5` (6 of 8 compose builders agreed) |
-| `v1.2.1` | Scene 3: SolarWinds (`inject` on laptop C); scene 5: swapped download uses its backdoored binary, and an older tag's certificate | `CERTIFIED`, honest hash `TBD`; backdoored hash (with `backdoor.patch`) `TBD` |
-| `v1.2.2` | Scene 6: a laptop drops off | `CERTIFIED` with 3 of 4, hash `TBD` |
-| `v1.2.3` | Scene 7: caught cheater (`equivocate` on laptop B) | `CERTIFIED`, `EQUIVOCATION` evidence, hash `TBD` |
+| `v1.2.1` | Scene 3: SolarWinds (`inject` on laptop C); scene 5: swapped download uses its backdoored binary, and an older tag's certificate | `CERTIFIED`, honest hash `1ddd637bbb7565d2bc773dd923ef6600ce95f8997bc53b66ce1244a46caaea65`; backdoored hash (with `backdoor.patch`) `0e86e0174e00d105d88152d91022f63200c03ebd1aa695fcb0e94facdbe6204b` |
+| `v1.2.2` | Scene 6: a laptop drops off | `CERTIFIED` with 3 of 4, hash `8c6e6bf6a0b83664e636abb851b9d0197231077e72f76a8a1e1932cbc16d40d8` |
+| `v1.2.3` | Scene 7: caught cheater (`equivocate` on laptop B) | `CERTIFIED`, `EQUIVOCATION` evidence, hash `a2771b9ac98466d59e0a46d86d06ffb07aae6916f88b681cec3439360228d538` |
 | `v1.2.4`, `v1.2.5` | Spare tags for rehearsals and re-runs | `CERTIFIED`, hashes `TBD` |
 | `v0.9.0-broken` | Compile error | `BUILD_FAILED` (exit 5) |
 | `v0.9.1-norecipe` | No `matrix.toml` | stays `PENDING` (exit 3) |
