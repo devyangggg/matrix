@@ -339,6 +339,26 @@ def test_ceremony_genesis_is_deterministic_and_valid():
     assert (g2.f, g2.replicas, g2.threshold) == (0, 2, 1)
 
 
+def test_seal_round_trip_and_strict_parsing():
+    fs = founders(4)
+    g = parse_genesis(d.ceremony_genesis(PARAMS, fs))
+    msg = d.make_seal("matrix-demo", node_key(NAMES[0]), fs, g.hash)
+    s = d.parse_seal(msg, "matrix-demo")
+    assert s.genesis_hash == g.hash and len(s.founders) == 4
+    assert [k for _, k in s.founders] == sorted(k for _, k in s.founders)  # canonical order
+    assert d.parse_seal(msg, "other-network") is None
+    outsider = d.make_seal("matrix-demo", node_key("outsider"), fs, g.hash)
+    assert d.parse_seal(outsider, "matrix-demo") is None  # the proposer must be listed
+    raw = loads_strict(msg)
+    raw["body"]["genesis_hash"] = "e" * 64  # signed body changed: the signature breaks
+    assert d.parse_seal(canonical_json(raw), "matrix-demo") is None
+    raw = loads_strict(msg)
+    raw["body"]["founders"].reverse()  # not the canonical (sorted) order
+    assert d.parse_seal(canonical_json(raw), "matrix-demo") is None
+    assert d.parse_seal(b"x" * (d.MAX_SEAL + 1), "matrix-demo") is None
+    assert d.parse_founder(msg, "matrix-demo") is None  # a seal is never a founder
+
+
 def test_short_code():
     assert d.short_code("3f2a9c1d77e041b8" + "0" * 48) == "3F2A-9C1D-77E0-41B8"
 

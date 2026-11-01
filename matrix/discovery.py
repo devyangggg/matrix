@@ -29,6 +29,8 @@ MAX_HELLO = 512
 FOUNDER_INTERVAL_S = 2
 CEREMONY_TIMEOUT_S = 300
 MAX_CEREMONY = 1024
+MAX_SEAL = 2048  # a seal lists every founder's name and key: about 140 bytes each
+MAX_FOUNDERS = 16
 FOUNDER_PREFIX = b"matrix/v1-founder\0"
 BROADCAST = "255.255.255.255"
 
@@ -579,6 +581,65 @@ def parse_endorse(data: Any, pubkeys: Mapping[str, str]) -> Endorse | None:
         if not verify(pubkeys[signer], gh, _unsigned(raw), raw["sig"]):
             return None
         return Endorse(signer, gh, raw)
+    except Exception:  # noqa: BLE001  never raises
+        return None
+
+
+@dataclass(frozen=True)
+class Seal:
+    """A founder's proposal: "seal the network with exactly these founders" (RFC §7.16)."""
+
+    signer: str  # the proposer's node pubkey
+    genesis_hash: str  # what the proposer computed from the list below
+    founders: tuple[tuple[str, str], ...]  # (name, pubkey), sorted by pubkey
+    raw: dict
+
+
+def make_seal(network_id: str, sk, founders: Sequence[Founder], genesis_hash: str) -> bytes:
+    body = {
+        "network_id": network_id,
+        "genesis_hash": genesis_hash,
+        "founders": [
+            {"id": x.id, "pubkey": x.pubkey} for x in sorted(founders, key=lambda x: x.pubkey)
+        ],
+    }
+    unsigned = {"v": 1, "type": "seal", "signer": pubkey_hex(sk), "body": body}
+    sig = sk.sign(founder_bytes(network_id, unsigned)).signature.hex()
+    return canonical_json({**unsigned, "sig": sig})
+
+
+def parse_seal(data: Any, network_id: str) -> Seal | None:
+    try:
+        raw, _ = _load(data, MAX_SEAL)
+        if raw is None or raw["type"] != "seal":
+            return None
+        b = raw["body"]
+        if (
+            set(b) != {"network_id", "genesis_hash", "founders"}
+            or b["network_id"] != network_id
+            or not _m(_HEX64, b["genesis_hash"])
+            or not _m(_HEX64, raw["signer"])
+            or not isinstance(b["founders"], list)
+            or not 1 <= len(b["founders"]) <= MAX_FOUNDERS
+        ):
+            return None
+        entries = b["founders"]
+        if any(
+            not isinstance(x, dict)
+            or set(x) != {"id", "pubkey"}
+            or not valid_name(x["id"])
+            or not _m(_HEX64, x["pubkey"])
+            for x in entries
+        ):
+            return None
+        keys = [x["pubkey"] for x in entries]
+        if keys != sorted(set(keys)) or raw["signer"] not in keys:
+            return None  # sorted and distinct: one canonical form; the proposer is a founder
+        if not _verify_raw(raw["signer"], founder_bytes(network_id, _unsigned(raw)), raw["sig"]):
+            return None
+        return Seal(
+            raw["signer"], b["genesis_hash"], tuple((x["id"], x["pubkey"]) for x in entries), raw
+        )
     except Exception:  # noqa: BLE001  never raises
         return None
 

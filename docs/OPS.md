@@ -210,23 +210,38 @@ What happens:
    4 founders, params match. Press Enter to seal.
    ```
 
-3. **Seal.** When exactly the expected laptops are listed, press **Enter** on each laptop. Seal is
-   refused with fewer than 2 founders, duplicate names or any parameter mismatch. With 2 or 3
+3. **Propose.** When the expected laptops are listed, **one** user presses **Enter**. That laptop
+   builds the genesis from the founders it has heard (nodes and release signers sorted by public
+   key, no addresses, f = n // 4, replicas = n, threshold = f + 1), shows its **short code** (the
+   first 16 hex characters of the genesis hash) and sends a signed **proposal** carrying the list
+   of founders (name and key) and the hash. Proposals are refused with fewer than 2 founders,
+   duplicate names, a key announced under two names, or any parameter mismatch. With 2 or 3
    founders f = 0: one builder alone certifies, so use them for testing only; the demo needs 4.
-   Every laptop
-   then builds the same genesis (nodes and release signers sorted by public key, no addresses,
-   f = n // 4, replicas = n, threshold = f + 1) and shows its **short code**, the first 16 hex
-   characters of the genesis hash:
 
    ```
-   short code 3F2A-9C1D-77E0-41B8
-   Read it aloud. Same on every laptop? [y/N]
+   Proposing to seal 4 founders: ...
+   Short code: 3F2A-9C1D-77E0-41B8
+   The others are asked to accept it. Read the short code aloud. Confirm? [y/N]
    ```
 
-4. **Compare.** One person reads the code aloud; every user checks their own screen and types `y`
-   only if it matches. This human comparison is the trust root (like Bluetooth pairing or Signal
-   safety numbers).
-5. **Endorse.** Each laptop then broadcasts a signed endorsement of the genesis hash. Genesis
+4. **Accept.** Every other laptop prints the proposal: who proposes, the short code, the founder
+   list, and what differs from what it has heard itself (a founder not heard yet, a founder the
+   proposal lacks, a different name, a different `network.toml`):
+
+   ```
+   >> laptop-a (9f3e21c0) proposes to seal 4 founders, short code 3F2A-9C1D-77E0-41B8:
+        laptop-a ...
+      Same list as yours. Type y to accept once the short code matches aloud.
+   ```
+
+   A proposal that arrives before a founder it lists is not lost: the screen says what is not heard
+   yet and shows the proposal again as soon as everything matches. The proposer re-sends it every
+   2 s with its announcement, so lost packets only delay. **Type `y` only if the short code read
+   aloud matches and the list is exactly the expected laptops.** This human comparison is the
+   trust root (like Bluetooth pairing or Signal safety numbers). A proposer can answer `n` to
+   withdraw; `y` at the main prompt accepts another laptop's proposal instead. If a proposal says
+   "Cannot accept this" (you also hear a founder it lacks), press Enter to propose the full list.
+5. **Endorse.** Each laptop that confirmed broadcasts a signed endorsement of the genesis hash. Genesis
    becomes active only with a valid endorsement from **every** node in it: anyone can veto. After 5
    minutes without all endorsements the ceremony aborts and nothing is written.
 6. **Run.** On success it writes `~/.matrix/genesis.json`, `~/.matrix/genesis.sha256` and

@@ -132,12 +132,13 @@ founding network matrix-demo (network.toml params a41c…)
 4 founders, params match. Press Enter to seal.
 ```
 
-When all four rows are listed on every screen, each user presses **Enter**. Every laptop builds
-the same genesis and shows the same short code:
+When all four rows are listed on every screen, **one** user presses **Enter**. That laptop shows
+the short code and sends the proposal; the other three screens print it (who proposes, the
+founder list, the same short code) and ask for `y`:
 
 ```
 short code 3F2A-9C1D-77E0-41B8
-Read it aloud. Same on every laptop? [y/N]
+Read it aloud. Confirm? [y/N]            # on the proposer; the others: "Type y to accept"
 ```
 
 One person reads the code aloud; each user checks their own screen and types `y`. After all four

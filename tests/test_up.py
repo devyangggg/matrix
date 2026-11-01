@@ -48,6 +48,7 @@ class Hub:
     def __init__(self):
         self.buses = []
         self.extra: dict[int, list[bytes]] = {}  # bus index -> datagrams only it receives
+        self.drop_seals = 0  # lose the next N seal proposals on the wire
 
 
 class MemBus:
@@ -61,6 +62,9 @@ class MemBus:
             cb(data, ("10.0.0.66", d.DISCOVERY_PORT))
 
     def send(self, data):
+        if self.hub.drop_seals and b'"type":"seal"' in data:
+            self.hub.drop_seals -= 1
+            return
         loop = asyncio.get_running_loop()
         for b in list(self.hub.buses):
             loop.call_soon(b.cb, data, ("10.0.0.1", d.DISCOVERY_PORT))
@@ -70,9 +74,27 @@ class MemBus:
 
 
 def answers(confirm="y"):
+    refused = False
+
+    async def ask(kind):
+        nonlocal refused
+        await asyncio.sleep(0.02)
+        if refused:
+            return ""  # the user closed the terminal after refusing
+        if kind == "confirm":
+            refused = confirm != "y"
+            return f"{confirm}\n"
+        return "\n"
+
+    return ask
+
+
+def accepts():
+    """A laptop whose user never proposes: `y` at every prompt accepts a proposal once one shows."""
+
     async def ask(kind):
         await asyncio.sleep(0.02)
-        return f"{confirm}\n" if kind == "confirm" else "\n"
+        return "y\n"
 
     return ask
 
@@ -114,6 +136,59 @@ async def test_four_laptops_found_the_same_network(capsys):
     assert f"Short code: {d.short_code(g.hash)}" in out
 
 
+@pytest.mark.parametrize("lost", [0, 5])  # lost seals are re-sent every round
+async def test_other_laptops_accept_one_proposal(lost):
+    hub = Hub()
+    hub.drop_seals = lost
+    asks = [answers(), accepts(), accepts(), accepts()]  # only laptop-a presses Enter
+    results = await asyncio.gather(
+        *(
+            cli.ceremony(
+                PARAMS,
+                name,
+                node_key(name),
+                release_key(name),
+                MemBus(hub, i),
+                asks[i],
+                timeout=5.0,
+                interval=0.01,
+            )
+            for i, name in enumerate(NAMES)
+        )
+    )
+    assert all(r is not None for r in results)
+    assert len({canonical_json(r[0]) for r in results}) == 1
+
+
+async def test_proposal_that_arrives_before_its_founder_waits_then_shows(capsys):
+    # Out of order: laptop-x's seal reaches laptop-a before laptop-x's own announcement.
+    def founder(name, key):
+        return d.parse_founder(
+            d.make_founder(PARAMS, name, node_key(key), release_key(key)), "matrix-demo"
+        )
+
+    fa, fx = founder("laptop-a", "laptop-a"), founder("laptop-x", "x")
+    g = parse_genesis(d.ceremony_genesis(PARAMS, [fa, fx]))
+    hub = Hub()
+    hub.extra[0] = [
+        d.make_seal("matrix-demo", node_key("x"), [fa, fx], g.hash),
+        canonical_json(fx.raw),
+    ]
+    await cli.ceremony(
+        PARAMS,
+        "laptop-a",
+        node_key("laptop-a"),
+        release_key("laptop-a"),
+        MemBus(hub, 0),
+        accepts(),
+        timeout=0.3,
+        interval=0.01,
+    )
+    out = capsys.readouterr().out
+    assert out.index("not heard yet: laptop-x") < out.index("Same list as yours")
+    assert "Accepted the proposal with 2 founders" in out
+
+
 async def test_anyone_can_veto():
     results = await found(Hub(), confirms=("y", "y", "y", "n"), timeout=0.5)
     assert results == [None, None, None, None]  # laptop-d said no: nobody founds anything
@@ -150,6 +225,32 @@ async def test_two_laptops_found_a_network_without_fault_tolerance(capsys):
     g = parse_genesis(results[0][0])
     assert (g.f, g.replicas, g.threshold, len(g.nodes)) == (0, 2, 1, 2)
     assert "WARNING: 2 founders give f=0" in capsys.readouterr().out
+
+
+async def test_one_key_under_two_names_blocks_the_seal(capsys):
+    # A stale `matrix up --name old` and a new one on the same laptop: "latest wins" would flip,
+    # so laptops sealing at different moments would disagree on the genesis.
+    hub = Hub()
+    hub.extra[0] = [
+        d.make_founder(PARAMS, name, node_key("x"), release_key("x")) for name in ("old", "new")
+    ]
+    task = asyncio.create_task(
+        cli.ceremony(
+            PARAMS,
+            "laptop-a",
+            node_key("laptop-a"),
+            release_key("laptop-a"),
+            MemBus(hub, 0),
+            answers(),
+            timeout=0.5,
+            interval=0.01,
+        )
+    )
+    await asyncio.sleep(0.2)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    out = capsys.readouterr().out
+    assert "announces as new and old" in out and "cannot seal yet: key" in out
 
 
 async def test_seal_waits_for_matching_network_toml(capsys):

@@ -30,6 +30,7 @@ from .discovery import (
     Endorse,
     Founder,
     NetworkError,
+    Seal,
     broadcast_targets,
     ceremony_genesis,
     check_endorsements,
@@ -38,9 +39,11 @@ from .discovery import (
     local_ip,
     make_endorse,
     make_founder,
+    make_seal,
     params_hash,
     parse_endorse,
     parse_founder,
+    parse_seal,
     seal_problem,
     short_code,
     udp_socket,
@@ -692,6 +695,20 @@ async def ceremony(
     endorses: dict[str, Endorse] = {}
     mine = params_hash(params)
     sealed: dict[str, str] = {}  # after the seal: genesis id -> pubkey, the only keys that count
+    # pubkey -> {name: last time seen}. One key under two names means two `matrix up` processes
+    # on one laptop (e.g. a stale one): "latest wins" would then flip between names, and laptops
+    # that seal at different moments would build different genesis files.
+    names: dict[str, dict[str, float]] = {}
+    warned: set[tuple[str, str]] = set()
+
+    def split_keys() -> dict[str, list[str]]:
+        now = loop.time()
+        live = {
+            pub: sorted(n for n, t in seen.items() if now - t <= ONLINE_WINDOW_S)
+            for pub, seen in names.items()
+        }
+        return {pub: ns for pub, ns in live.items() if len(ns) > 1}
+
     rx = {"own": 0, "others": 0, "ignored": 0}  # datagram counts, for the debug summary
     log.info(
         "ceremony: network %r, name %s, node key %s, params hash %s, announce every %ss, timeout %ss",
@@ -707,11 +724,72 @@ async def ceremony(
         flag = "" if f.params_hash == mine else "  params MISMATCH (different network.toml)"
         _out(f"  + {f.id:<24} {f.pubkey[:8]}{flag}")
 
+    proposals: dict[str, Seal] = {}  # proposer key -> its latest seal proposal (never our own)
+    shown: dict[str, tuple] = {}  # proposer key -> what the screen last said about it
+
+    def judge(s: Seal) -> tuple[str, list[str]]:
+        """How a proposal fits what this laptop has heard: ("ok" | "waiting" | "refused", notes).
+        A proposal can arrive before the founders it lists, or after a message was lost, so this
+        runs again on every change instead of deciding once."""
+        listed = {k: n for n, k in s.founders}
+        notes = []
+        for k, n in listed.items():
+            f = founders.get(k)
+            if f is None:
+                notes.append(f"not heard yet: {n} {k[:8]} (waiting for its announcement)")
+            elif f.id != n:
+                notes.append(f"key {k[:8]} is {f.id} here, the proposal says {n}")
+        if notes:
+            return "waiting", notes
+        fs = [founders[k] for k in listed]
+        problem = seal_problem(params, fs, me_pub)
+        if problem is None and parse_genesis(ceremony_genesis(params, fs)).hash != s.genesis_hash:
+            problem = "same list but a different genesis: different network.toml?"
+        if problem:
+            notes.append(problem)
+        for k, f in founders.items():
+            if k not in listed:
+                notes.append(f"you also hear {f.id} {k[:8]}, which the proposal lacks")
+        for pub, ns in split_keys().items():
+            notes.append(f"key {pub[:8]} announces as {' and '.join(ns)} (two `matrix up`?)")
+        return ("refused" if notes else "ok"), notes
+
+    def review() -> None:
+        """Tell the user about each proposal, again whenever what we can say about it changes."""
+        if sealed:
+            return
+        for pub, s in proposals.items():
+            state, notes = judge(s)
+            if shown.get(pub) == (s.genesis_hash, state, tuple(notes)):
+                continue
+            shown[pub] = (s.genesis_hash, state, tuple(notes))
+            who = next((n for n, k in s.founders if k == pub), "?")
+            _out(
+                f">> {who} ({pub[:8]}) proposes to seal {len(s.founders)} founders, "
+                f"short code {short_code(s.genesis_hash)}:"
+            )
+            for n, k in s.founders:
+                _out(f"     {n:<24} {k[:8]}")
+            for note in notes:
+                _out(f"   ! {note}")
+            if state == "ok":
+                _out("   Same list as yours. Type y to accept once the short code matches aloud.")
+            else:
+                _out("   Cannot accept yet." if state == "waiting" else "   Cannot accept this.")
+
     def on_datagram(data: bytes, src) -> None:
         f = parse_founder(data, nid)
         if f is not None:
             prev = founders.get(f.pubkey)
             founders[f.pubkey] = f  # latest wins
+            names.setdefault(f.pubkey, {})[f.id] = loop.time()
+            for pub, ns in split_keys().items():
+                if (pub, ns[-1]) not in warned and pub == f.pubkey:
+                    warned.add((pub, ns[-1]))
+                    _out(
+                        f"  ! key {pub[:8]} announces as {' and '.join(ns)}: "
+                        "is `matrix up` running twice on one laptop? Stop one of them."
+                    )
             own_echo = f.pubkey == me_pub
             rx["own" if own_echo else "others"] += 1
             log.debug(
@@ -723,6 +801,18 @@ async def ceremony(
             )
             if prev is None or (prev.id, prev.params_hash) != (f.id, f.params_hash):
                 show(f)
+                review()  # a proposal may have been waiting for exactly this founder
+            return
+        s = parse_seal(data, nid)
+        if s is not None:
+            rx["own" if s.signer == me_pub else "others"] += 1
+            log.debug(
+                "ceremony: seal by %s for %s from %s", s.signer[:8], s.genesis_hash[:8], src[0]
+            )
+            if s.signer != me_pub:
+                proposals.pop(s.signer, None)  # newest last, so `y` takes the latest
+                proposals[s.signer] = s
+                review()
             return
         # Before the seal, founders' keys; after it, only the sealed genesis keys, so a late
         # rogue using a member's name cannot shadow that member's endorsement.
@@ -774,37 +864,74 @@ async def ceremony(
         _out(f"Founding network {nid!r} as {name} ({me_pub[:8]}). Founders found:")
         show(founders[me_pub])
         _out("Press Enter to seal when every laptop is listed.")
+        proposal: bytes | None = None
         while True:
             line = await ask("seal")
-            log.debug("ceremony: Enter pressed (%d founders listed)", len(founders))
+            log.debug("ceremony: input %r (%d founders listed)", line.strip(), len(founders))
             if not line:
                 _err("stdin closed: the ceremony needs a terminal")
                 return None
-            problem = seal_problem(params, list(founders.values()), me_pub)
-            if problem is None:
+            if line.strip().lower() in ("y", "yes"):  # accept a proposal from another laptop
+                s = next(
+                    (s for s in reversed(list(proposals.values())) if judge(s)[0] == "ok"), None
+                )
+                if s is None:
+                    _out("no proposal to accept yet: one laptop presses Enter to propose")
+                    continue
+                fs = [founders[k] for _, k in s.founders]
+                raw = ceremony_genesis(params, fs)
+                g = parse_genesis(raw)
+                _out(f"Accepted the proposal with {len(fs)} founders:")
+                log.info("ceremony: accepted proposal %s of %s", g.hash, s.signer[:8])
                 break
-            log.info("ceremony: seal refused: %s", problem)
-            _out(f"cannot seal yet: {problem}")
-        fs = list(founders.values())  # frozen: later founders do not change our genesis
-        raw = ceremony_genesis(params, fs)
-        g = parse_genesis(raw)
-        log.info("ceremony: sealed %d founders, genesis hash %s", len(fs), g.hash)
-        _out(f"Sealed {len(fs)} founders:")
-        for n in g.nodes:
-            _out(f"  {n.id:<24} {n.pubkey[:8]}")
-        _out(f"Short code: {short_code(g.hash)}")
-        if g.f == 0:
-            _out(
-                f"WARNING: {len(fs)} founders give f=0: ONE builder alone certifies a release, "
-                "so no builder can be a faulty or malicious one. Use 4 or more laptops for f=1."
+            problem = seal_problem(params, list(founders.values()), me_pub)
+            for pub, ns in split_keys().items():
+                problem = problem or (
+                    f"key {pub[:8]} announces as {' and '.join(ns)} "
+                    "(two `matrix up` on one laptop?): stop one, then Enter again"
+                )
+            if problem is not None:
+                log.info("ceremony: seal refused: %s", problem)
+                _out(f"cannot seal yet: {problem}")
+                continue
+            fs = list(founders.values())  # frozen: later founders do not change our proposal
+            raw = ceremony_genesis(params, fs)
+            g = parse_genesis(raw)
+            log.info(
+                "ceremony: proposing %d founders %s, genesis hash %s",
+                len(fs),
+                [f"{f.id}:{f.pubkey[:8]}" for f in fs],
+                g.hash,
             )
-        drain()  # an extra Enter pressed while sealing must not answer the y/N question
-        _out("Read it aloud. Do all screens show this code and this list? [y/N]")
-        answer = (await ask("confirm")).strip().lower()
-        log.info("ceremony: short code answer %r", answer)
-        if answer != "y":
-            _err("aborted: nothing written")
-            return None
+            _out(f"Proposing to seal {len(fs)} founders:")
+            for n in g.nodes:
+                _out(f"  {n.id:<24} {n.pubkey[:8]}")
+            _out(f"Short code: {short_code(g.hash)}")
+            if g.f == 0:
+                _out(
+                    f"WARNING: {len(fs)} founders give f=0: ONE builder alone certifies a release, "
+                    "so no builder can be a faulty or malicious one. Use 4 or more laptops for f=1."
+                )
+            # Sent again every round with the founder announcements: a lost datagram only delays.
+            proposal = make_seal(nid, sk, fs, g.hash)
+            sending.append(proposal)
+            bus.send(proposal)
+            drain()  # an extra Enter pressed while proposing must not answer the y/N question
+            _out("The others are asked to accept it. Read the short code aloud. Confirm? [y/N]")
+            answer = await ask("confirm")
+            log.info("ceremony: short code answer %r", answer.strip())
+            if not answer:
+                _err("stdin closed: the ceremony needs a terminal")
+                return None
+            if answer.strip().lower() == "y":
+                break
+            sending.remove(proposal)  # withdrawn: back to listening, or accept another proposal
+            proposal = None
+            _out("Proposal withdrawn. Enter proposes again; y accepts another laptop's proposal.")
+        if proposal is None:  # accepted, not proposed: show what we are about to endorse
+            for n in g.nodes:
+                _out(f"  {n.id:<24} {n.pubkey[:8]}")
+            _out(f"Short code: {short_code(g.hash)}")
 
         sealed.update({n.id: n.pubkey for n in g.nodes})
         endorses = {k: e for k, e in endorses.items() if parse_endorse(e.raw, sealed)}
