@@ -8,6 +8,7 @@ import math
 import os
 import random
 import re
+import select
 import sys
 import threading
 import time
@@ -652,11 +653,13 @@ class UdpBus:
             self.transport.close()
 
 
-def _stdin_lines() -> "asyncio.Queue[str]":
+def _stdin_lines() -> "tuple[asyncio.Queue[str], threading.Event]":
     """Lines typed by the user, read on a daemon thread so the event loop keeps listening and
-    an interrupted ceremony never waits for Enter on exit. EOF arrives as ""."""
+    an interrupted ceremony never waits for Enter on exit. EOF arrives as "". Setting the event
+    stops the reader: the dashboard that follows the ceremony needs stdin to itself."""
     loop = asyncio.get_running_loop()
     q: asyncio.Queue[str] = asyncio.Queue()
+    stop = threading.Event()
 
     def put(line: str) -> None:
         try:
@@ -665,15 +668,29 @@ def _stdin_lines() -> "asyncio.Queue[str]":
             pass  # the loop already closed
 
     def reader() -> None:
+        buf = b""
         try:
-            for line in sys.stdin:
-                put(line)
+            fd = sys.stdin.fileno()
+            while not stop.is_set():
+                if not select.select([fd], [], [], 0.2)[0]:
+                    continue  # wakes up to notice `stop`
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    put(line.decode("utf-8", "replace") + "\n")
         except (OSError, ValueError):
             pass  # stdin closed or not readable: treated as end of input
+        if stop.is_set():
+            return
+        if buf:
+            put(buf.decode("utf-8", "replace"))
         put("")
 
     threading.Thread(target=reader, daemon=True).start()
-    return q
+    return q, stop
 
 
 async def ceremony(
@@ -1152,8 +1169,9 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
             broadcast_targets(),
             DISCOVERY_PORT,
         )
+        stop_reading = None
         try:
-            lines = _stdin_lines()
+            lines, stop_reading = _stdin_lines()
 
             def drain() -> None:
                 eof = False
@@ -1168,6 +1186,9 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
         except OSError as e:
             _err(f"cannot use UDP port {DISCOVERY_PORT}: {e} (is `matrix up` already running?)")
             return EXIT_ERROR
+        finally:
+            if stop_reading is not None:
+                stop_reading.set()
         if result is None:
             return EXIT_ERROR
         raw, endorsements, endorse = result
@@ -1209,8 +1230,18 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
     extra = asyncio.create_task(_keep_endorsing(endorse, CEREMONY_TIMEOUT_S)) if endorse else None
     log.info("up: starting the node: %s", vars(args))
     _out(f"{me.id}: builder starting on 0.0.0.0:7700 (Ctrl-C to stop)")
+    # Just founded, on a real terminal: show the dashboard now. Later runs keep the plain
+    # foreground builder (`matrix tui` in a second terminal, as before).
+    show_tui = endorse is not None and sys.stdin.isatty() and sys.stdout.isatty()
     try:
-        await node.run(args)
+        if show_tui:
+            if getattr(a, "verbose", False):  # stderr would garble the full-screen UI
+                logfile = home / "verbose.log"
+                _out(f"verbose log: {logfile}")
+                node.configure_logging(True, str(logfile))
+            await _node_and_tui(node, args, g, "127.0.0.1:7700")
+        else:
+            await node.run(args)
     except ValueError as e:
         _err(str(e))
         return EXIT_ERROR
@@ -1222,6 +1253,49 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
             extra.cancel()
             await asyncio.gather(extra, return_exceptions=True)
     return EXIT_OK
+
+
+async def _wait_listening(local: str, task: "asyncio.Task", seconds: float = 30) -> None:
+    """Until the builder's HTTP port answers (or the builder task ends), so the dashboard's first
+    frame is not "no builder at ..." while Docker is still being checked."""
+    host, _, port = local.rpartition(":")
+    deadline = time.monotonic() + seconds
+    while not task.done() and time.monotonic() < deadline:
+        try:
+            _, w = await asyncio.open_connection(host, int(port))
+            w.close()
+            return
+        except OSError:
+            await asyncio.sleep(0.2)
+
+
+async def _node_and_tui(node: Any, args: argparse.Namespace, g: Genesis, local: str) -> None:
+    """Run the builder and the dashboard side by side on one terminal. If the builder stops the
+    dashboard closes; if the user quits the dashboard the builder keeps running in the foreground."""
+    from .tui import MatrixTui, play_intro
+
+    node_task = asyncio.create_task(node.run(args))
+    await _wait_listening(local, node_task)
+    if node_task.done():
+        node_task.result()  # it stopped before listening: raise why
+        return
+    play_intro()
+    app = MatrixTui(g, local)
+    tui_task = asyncio.create_task(app.run_async())
+    done, _ = await asyncio.wait({node_task, tui_task}, return_when=asyncio.FIRST_COMPLETED)
+    if node_task in done:
+        app.exit()
+        await asyncio.gather(tui_task, return_exceptions=True)
+        node_task.result()  # raises the builder's error, if any
+        return
+    try:
+        tui_task.result()
+    except Exception as e:  # noqa: BLE001  a dashboard crash must not stop the builder
+        _err(f"dashboard stopped: {e!r}")
+    _out(
+        "Dashboard closed; the builder keeps running here (Ctrl-C to stop; `matrix tui` reopens it)."
+    )
+    await node_task
 
 
 # entry point

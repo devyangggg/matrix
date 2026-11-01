@@ -150,6 +150,10 @@ wrote ~/.matrix/genesis.json, ~/.matrix/genesis.sha256, ~/.matrix/endorsements.j
 node laptop-a listening on 0.0.0.0:7700, discovery on UDP 7788
 ```
 
+Right after founding, every laptop's terminal switches to the dashboard (the builder keeps running
+behind it; `q` closes the dashboard, Ctrl-C then stops the builder). Laptop A uses its own `matrix tui`
+(T2) on the projector for the rest of the demo; the others can leave theirs open or close it.
+
 Laptop A, T2:
 
 ```bash

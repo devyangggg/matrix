@@ -662,12 +662,17 @@ class MatrixTui(App):
         return "Enter: proof JSON"
 
 
-def run_tui(g: Genesis, local: str) -> int:
+def play_intro() -> None:
+    """The curses intro, only on a real terminal; blocks for about two seconds."""
     if sys.stdin.isatty() and sys.stdout.isatty():
         try:
             curses.wrapper(_intro)  # wrapper restores terminal modes before Textual starts.
         except (curses.error, OSError):
             pass  # A terminal without curses support can still run the dashboard.
+
+
+def run_tui(g: Genesis, local: str) -> int:
+    play_intro()
     MatrixTui(g, local).run()
     return 0
 

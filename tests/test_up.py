@@ -14,6 +14,65 @@ from matrix.canon import canonical_json, loads_strict
 from matrix.crypto import pubkey_hex
 from matrix.genesis import parse_genesis
 
+
+class FakeNode:
+    def __init__(self):
+        self.stop = asyncio.Event()
+
+    async def run(self, args):
+        await self.stop.wait()
+
+
+@pytest.fixture
+def fake_tui(monkeypatch):
+    """matrix.tui with a dashboard that runs until it is told to exit; apps are collected."""
+    from matrix import tui
+
+    apps = []
+
+    class FakeApp:
+        def __init__(self, g, local):
+            self.quit = asyncio.Event()
+            apps.append(self)
+
+        async def run_async(self):
+            await self.quit.wait()
+
+        def exit(self):
+            self.quit.set()
+
+    monkeypatch.setattr(tui, "MatrixTui", FakeApp)
+    monkeypatch.setattr(tui, "play_intro", lambda: None)
+
+    async def listening(*args):  # FakeNode opens no port
+        return None
+
+    monkeypatch.setattr(cli, "_wait_listening", listening)
+    return apps
+
+
+async def test_dashboard_closes_when_the_builder_stops(fake_tui):
+    node = FakeNode()
+    task = asyncio.create_task(cli._node_and_tui(node, None, None, "127.0.0.1:7700"))
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    node.stop.set()
+    await asyncio.wait_for(task, 1)
+    assert fake_tui[0].quit.is_set()
+
+
+async def test_builder_keeps_running_when_the_dashboard_is_closed(fake_tui, capsys):
+    node = FakeNode()
+    task = asyncio.create_task(cli._node_and_tui(node, None, None, "127.0.0.1:7700"))
+    await asyncio.sleep(0.05)
+    fake_tui[0].quit.set()  # the user pressed q
+    await asyncio.sleep(0.05)
+    assert not task.done()  # the builder is still the foreground process
+    assert "Dashboard closed" in capsys.readouterr().out
+    node.stop.set()
+    await asyncio.wait_for(task, 1)
+
+
 PARAMS = {
     "name": "matrix-demo",
     "allowed_repos": ["https://github.com/org/hello"],

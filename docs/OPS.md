@@ -246,7 +246,11 @@ What happens:
    minutes without all endorsements the ceremony aborts and nothing is written.
 6. **Run.** On success it writes `~/.matrix/genesis.json`, `~/.matrix/genesis.sha256` and
    `~/.matrix/endorsements.json`, then starts the node in the same process: listen
-   `0.0.0.0:7700`, data `~/.matrix/data`, discovery on UDP 7788.
+   `0.0.0.0:7700`, data `~/.matrix/data`, discovery on UDP 7788. On a terminal, a fresh founding
+   then opens the dashboard (`matrix tui`) in the same window once the builder answers; `q`
+   closes it and the builder keeps running (Ctrl-C stops it). With `-v` the log goes to
+   `~/.matrix/verbose.log` while the dashboard is open. Later runs of `matrix up` do not open it:
+   run `matrix tui` in a second terminal.
 
 On a mismatch, **never type `y`**:
 

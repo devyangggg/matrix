@@ -83,8 +83,9 @@ Founders appear on every screen. When all are listed, **one** laptop presses **E
 the **short code** and sends a signed proposal with the founder list. Every other laptop prints
 the proposal (who, which founders, what differs from what it heard itself); type `y` there only if
 the code read aloud matches and the list is exactly the expected laptops. Lost or reordered
-packets only delay it. When all laptops have endorsed, the builder starts. Later runs skip the
-ceremony.
+packets only delay it. When all laptops have endorsed, the builder starts and, on a terminal, the
+dashboard opens automatically (`q` closes it, the builder keeps running). Later runs skip the
+ceremony and the dashboard.
 
 Release from the publisher's laptop (keep `matrix up` running there, and open `matrix tui` in a
 second terminal):

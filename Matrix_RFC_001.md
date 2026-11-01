@@ -923,7 +923,7 @@ signed with the node key in the normal domain (`b"matrix/v1\0" + genesis_hash + 
 
 **One key, one name.** Founders are keyed by public key and the latest announcement wins. A key that announces two different names within `ONLINE_WINDOW_S` (typically two `matrix up` processes on one laptop, one of them stale) is flagged on screen and blocks proposing and accepting until one stops; otherwise the name would flip and laptops would seal different genesis files.
 
-**5. Start.** Write `~/.matrix/genesis.json`, `~/.matrix/genesis.sha256` (the pin) and `~/.matrix/endorsements.json`, then start the builder in the same process: its id is the genesis node whose pubkey is ours, it listens on `0.0.0.0:7700`, its data directory is `~/.matrix/data`, and discovery is on.
+**5. Start.** Write `~/.matrix/genesis.json`, `~/.matrix/genesis.sha256` (the pin) and `~/.matrix/endorsements.json`, then start the builder in the same process: its id is the genesis node whose pubkey is ours, it listens on `0.0.0.0:7700`, its data directory is `~/.matrix/data`, and discovery is on. After a fresh founding on a terminal, the dashboard (§7.12) opens in the same window as soon as the builder answers on `127.0.0.1:7700`; quitting it leaves the builder running, and if the builder stops the dashboard closes.
 
 **Later runs and options**
 

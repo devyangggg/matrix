@@ -487,7 +487,7 @@ Ceremony steps (`cli.ceremony`; nothing is written until step 7):
 4. Input at the main prompt: `y` accepts the newest `ok` proposal (all `ok` proposals give the same genesis); an empty line or anything else proposes: `seal_problem` and the one-name check, then print the list, the short code and (f = 0) the warning, add `make_seal` to the datagrams re-sent every round, and ask `confirm`. `y` goes on; anything else withdraws the proposal and returns to the main prompt; end of input aborts (exit 4).
 5. Build `g = parse_genesis(ceremony_genesis(...))` from the accepted or proposed list.
 6. Broadcast `make_endorse` every `FOUNDER_INTERVAL_S` (founders and the proposal too, for slower laptops) until `check_endorsements` holds (unanimity: anyone can veto). An endorsement from a genesis node for a different hash → abort. No unanimity within `CEREMONY_TIMEOUT_S` after `y` → abort.
-7. Write `genesis.json` (canonical JSON), `genesis.sha256`, `endorsements.json` (each via temp file + rename) and start the node (§3.13). Keep broadcasting the own endorse every `FOUNDER_INTERVAL_S` for `CEREMONY_TIMEOUT_S` so laptops that confirmed later can finish (L42).
+7. Write `genesis.json` (canonical JSON), `genesis.sha256`, `endorsements.json` (each via temp file + rename) and start the node (§3.13). Keep broadcasting the own endorse every `FOUNDER_INTERVAL_S` for `CEREMONY_TIMEOUT_S` so laptops that confirmed later can finish (L42). Stop the stdin reader first (L58).
 
 ### 3.11 `faults.py`
 
@@ -726,6 +726,7 @@ These fill gaps the RFC leaves open. Each one is the simplest option that works.
 | L55 | `broadcast_targets()` sends hellos and ceremony datagrams to `255.255.255.255` and to each interface's own broadcast address (`SIOCGIFBRDADDR` ioctl on Linux and macOS; elsewhere only the limited broadcast): the limited broadcast leaves by the default route only, and some networks drop it but forward the directed one |
 | L56 | A key announcing two names within `ONLINE_WINDOW_S` blocks proposing and accepting and is flagged on screen: two `matrix up` processes on one laptop made the latest-wins name flip, so laptops sealed different genesis files |
 | L57 | `-v` / `--verbose` on every command (and `matrix-node`) sets the root logger to DEBUG on stderr (`~/.matrix/verbose.log` for `tui`): every step, UDP datagram, HTTP call and Docker command is logged under `matrix.cli`, `matrix.discovery`, `matrix.net`, `matrix.builder`, `matrix.node`. Without it nothing changes, except a one-time warning when no other laptop is heard during the ceremony |
+| L58 | After a fresh founding on a TTY, `_up` runs the node and the dashboard in one event loop (`cli._node_and_tui`): wait until `127.0.0.1:7700` answers (so the first frame is not "no builder"), play the curses intro, run `MatrixTui.run_async()`. A node that stops closes the dashboard; quitting the dashboard leaves the node in the foreground. The ceremony's stdin reader thread (`select` + `os.read`, stoppable) is stopped when the ceremony ends, because the dashboard reads the same stdin; `--verbose` logging moves to `<home>/verbose.log` while the dashboard is open. Later runs of `matrix up` are unchanged |
 
 ## 11. Tests
 
