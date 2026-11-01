@@ -4,6 +4,7 @@ import itertools
 
 import pytest
 
+from matrix import builder
 from matrix.builder import (
     BuildEnv,
     build_argv,
@@ -163,3 +164,28 @@ def test_a_hostile_recipe_value_cannot_add_arguments():
     argv = build_argv(docker_common(ENV, RID, 0, "build"), WORK, IMAGE, evil)
     assert "--privileged" not in argv
     assert "-s; rm -rf /" in argv and "/out/out --privileged" in argv
+
+
+def test_gvisor_runtime_flag_only_when_detected():
+    assert "--runtime" not in docker_common(ENV, RID, 0, "build")
+    gvisor = BuildEnv("/data", "builder3", 1234, 5678, "runsc")
+    assert ("--runtime", "runsc") in pairs(docker_common(gvisor, RID, 0, "build"))
+
+
+@pytest.mark.parametrize(
+    "info, platform, runtime, text",
+    [
+        (b'{"runc":{},"runsc":{"path":"/usr/bin/runsc"}}\n', "linux", "runsc", "gVisor"),
+        (b'{"runc":{}}\n', "darwin", None, "Docker Desktop's Linux VM"),
+        (b'{"runc":{}}\n', "linux", None, "WARNING: gVisor not found"),
+        (b"", "linux", None, "WARNING"),  # docker info failed: never claim isolation
+    ],
+)
+async def test_isolation_reports_what_this_laptop_gets(monkeypatch, info, platform, runtime, text):
+    async def quiet(*argv):
+        return info
+
+    monkeypatch.setattr(builder, "_quiet", quiet)
+    monkeypatch.setattr(builder.sys, "platform", platform)
+    got, how = await builder.isolation()
+    assert got == runtime and text in how

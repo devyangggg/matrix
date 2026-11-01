@@ -240,6 +240,7 @@ class BuildEnv:
     data_dir: str            # <data>; work/, logs/, artifacts/ live under it
     node_id: str
     uid: int; gid: int       # os.getuid(), os.getgid()
+    runtime: str | None = None   # "runsc" (gVisor) when the daemon has it, from isolation()
 
 @dataclass(frozen=True)
 class Outcome:
@@ -254,7 +255,10 @@ def classify_go_build(rc: int, stderr: str, rerun_rc: int | None, rerun_stderr: 
                       workdir: str) -> str      # FAILED | ERROR (pure, unit-tested)
 async def cleanup_startup(env: BuildEnv) -> None   # rm work/*, docker rm -f mx-<node_id>-*
 def expire_artifacts(env: BuildEnv, now: float) -> None
+async def isolation() -> tuple[str | None, str]    # (runtime, description); never raises
 ```
+
+`isolation()` reads `docker info --format '{{json .Runtimes}}'`: if `runsc` is registered it returns `("runsc", ...)`, and every build container runs on gVisor's user-space kernel. Otherwise `None`, described as Docker Desktop's VM on macOS and as a warning (builds share the host's Linux kernel) elsewhere. The node calls it once at startup; `matrix up` prints the description. gVisor does not change build output (v1.2.0 gives the same hash under `runc` and `runsc`).
 
 Paths for one attempt: `W = <data>/work/<rid>`; `W/src`, `W/out`, `W/gomod`; log `<data>/logs/<rid>.log`; artifact `<data>/artifacts/<sha256>`.
 
@@ -279,7 +283,7 @@ Not-found markers (BAD_REF): `couldn't find remote ref`, `did not match any`, `r
 Common docker flags (build them in one function, `docker_common(env, rid, attempt, step) -> list[str]`):
 
 ```
---rm --platform linux/amd64 --user <uid>:<gid> --cap-drop ALL
+--rm [--runtime runsc] --platform linux/amd64 --user <uid>:<gid> --cap-drop ALL
 --security-opt no-new-privileges --memory 2g --cpus 1 --pids-limit 512
 --name mx-<node_id>-<rid[:8]>-<attempt>-<step>
 -e HOME=/tmp -e GOTOOLCHAIN=local -e GOFLAGS=-mod=readonly -modcacherw
@@ -517,7 +521,7 @@ Startup (refuse to start, exit 2, on any failure):
 
 ### 3.13 `cli.py`
 
-Common flags: `--genesis PATH` (default `$MATRIX_GENESIS`, else `~/.matrix/genesis.json`); `--node HOST:PORT`, the local builder (default `$MATRIX_NODE`, else `127.0.0.1:7700`). Defaults live under `~/.matrix/` (§4.1): pin `genesis.sha256`, release key `keys/release.key`.
+Common flags: `--genesis PATH` (default `$MATRIX_GENESIS`, else `~/.matrix/genesis.json`); `--node HOST:PORT`, the local builder (default `$MATRIX_NODE`, else `127.0.0.1:7700`). Both are accepted before or after the command of `release`, `status`, `evidence`, `tui` and `verify`. Defaults live under `~/.matrix/` (§4.1): pin `genesis.sha256`, release key `keys/release.key`.
 
 **Address resolution** (`release`, `status`, `evidence`, `tui`), over `http://`: if every genesis node has an `addr`, use those (dev genesis). Otherwise `GET http://<--node>/v1/peers` once, feed every hello into a fresh `AddressBook(g)` (`book.accept`, so each is re-verified against genesis and the highest seq per signer wins; forged or foreign hellos are dropped), and build `PeerClient(g, CLIENT, book)`. A node with neither a verified hello nor a genesis `addr` is unreachable. `release` and `tui` refresh the book every poll. A client counts a builder as online iff `now - seq / 1000 < ONLINE_WINDOW_S`, with `now` from the same `/v1/peers` reply (L41).
 
@@ -530,6 +534,7 @@ Common flags: `--genesis PATH` (default `$MATRIX_GENESIS`, else `~/.matrix/genes
 | `verify FILE --cert C --repo URL --tag T [--commit SHA] [--genesis-sha256 HEX]` | RFC §7.11 verify steps 1–4. Pin defaults to `~/.matrix/genesis.sha256`. No pin → exit 4 | 0, 1, 2, 4 |
 | `evidence [--since 1h]` | Query `/v1/evidence` on all builders, dedupe by `(kind, signer, request_id)`, print | 0 / 4 |
 | `tui` | Start the Textual app polling `--node` (§3.14) | 0 |
+| `help [COMMAND]` | The grouped command overview with exit codes, or one command's help (same as `COMMAND --help`). Bare `matrix` prints the overview to stderr | 0; bare `matrix` and an unknown COMMAND 4 |
 
 `up` details (`--home DIR` defaults to `~/.matrix`; all paths below are under it):
 
@@ -752,12 +757,11 @@ To get the single-platform digest: `docker buildx imagetools inspect golang:1.23
 
 ### 12.2 Docker Compose
 
-[docker-compose.yml](../docker-compose.yml) runs builder1..8 from one image built by [Dockerfile](../Dockerfile) (Python 3.11 + git + the Docker CLI).
+[docker-compose.yml](../docker-compose.yml) runs the demo network on one machine: builder1..4 (one per operator `laptopA..D`, from a `dev_genesis.py --nodes 4` genesis) from one image built by [Dockerfile](../Dockerfile) (Python 3.11 + git + the Docker CLI). The 8-builder dev genesis (the script's default) is for the integration tests only; compose has no services for builder5..8.
 
 - Builders start build containers on the **host** daemon through `/var/run/docker.sock`. Bind-mount paths are resolved on the host, so the data directory is mounted at the **same absolute path** inside and outside (`MATRIX_DATA` in `.env`).
 - Containers run as `MATRIX_UID:MATRIX_GID` with the host `docker` group added, so `--user <uid>:<gid>` and `rm -rf work/<id>` behave as on a laptop.
 - The `cli` service (profile `tools`) runs `matrix` inside the compose network, where `builderN:7700` resolves; pass `--node builder1:7700`. The log tail is loopback-only, so the TUI there shows no logs (use `docker compose logs` or the data dir).
-- [docker-compose.faults.yml](../docker-compose.faults.yml) is an override example that restarts chosen builders with fault flags for the demo scenes.
-- builder5..8 carry the compose profile `eight`. `.env` sets `COMPOSE_PROFILES=eight` for a `--nodes 8` dev genesis (the default) and leaves it empty for `--nodes 4`, so `docker compose up -d` starts exactly the builders in genesis; builder5..8 are not in a `--nodes 4` genesis and would restart forever (`node id is not in genesis`).
+- [docker-compose.faults.yml](../docker-compose.faults.yml) holds the demo faults: builder3 `inject` (scene 3) and builder2 `equivocate` (scene 7). Restart one named builder with it at a time (f = 1).
 
 Mounting the Docker socket gives root-equivalent access to the host. This is for development only.

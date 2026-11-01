@@ -90,7 +90,7 @@ L0  canon.py  crypto.py  genesis.py                   pure primitives
 
 ### 5.2 Development: one machine with Docker Compose
 
-[docker-compose.yml](../docker-compose.yml) runs 8 builders as containers on one compose network, from a dev genesis made by `scripts/dev_genesis.py`. Dev genesis keeps static `addr`s (`builderN:7700`), and operators are still `laptopA..D` so per-operator placement can be tested. `dev_genesis.py --nodes 4` gives an n = 4, f = 1 network with the demo's parameters. The local integration harness starts nodes with `--no-discovery` and uses the static `addr`s. Builders reach the host Docker daemon through the mounted socket. See [LLD §12](LLD.md#12-development-environment).
+[docker-compose.yml](../docker-compose.yml) runs the demo network on one machine: 4 builders as containers on one compose network (n = 4, f = 1, operators `laptopA..D`), from a `dev_genesis.py --nodes 4` genesis. Dev genesis keeps static `addr`s (`builderN:7700`). The script's 8-builder default (f = 2, two builders per operator) is used only by the integration tests, to test per-operator placement. The local integration harness starts nodes with `--no-discovery` and uses the static `addr`s. Builders reach the host Docker daemon through the mounted socket. See [LLD §12](LLD.md#12-development-environment).
 
 ### 5.3 Production (future, not MVP)
 

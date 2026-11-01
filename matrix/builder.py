@@ -7,11 +7,13 @@ error is `FAILED`; everything environmental is `ERROR` and abstains (invariant 6
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shutil
 import signal
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 
@@ -52,6 +54,7 @@ class BuildEnv:
     node_id: str
     uid: int
     gid: int
+    runtime: str | None = None  # GVISOR when the Docker daemon has it registered (isolation())
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,7 @@ def docker_common(env: BuildEnv, rid: str, attempt: int, step: str) -> list[str]
     """Sandbox flags shared by every build container (AGENTS §13.2 rule 9). Not optional."""
     return [
         "--rm",
+        *(["--runtime", env.runtime] if env.runtime else []),  # gVisor: a user-space kernel
         "--platform", "linux/amd64",
         "--user", f"{env.uid}:{env.gid}",
         "--cap-drop", "ALL",
@@ -199,6 +203,29 @@ async def _quiet(*argv: str) -> bytes:
         await proc.wait()
         return b""
     return out
+
+
+GVISOR = "runsc"  # the runtime name `runsc install` registers with Docker
+
+
+async def isolation() -> tuple[str | None, str]:
+    """(runtime, description) of the kernel isolation build containers get on this laptop.
+
+    gVisor whenever the Docker daemon has it: every syscall of a build then hits a user-space
+    kernel, not the laptop's. Without it, Docker Desktop on macOS still runs builds in its own
+    Linux VM; on Linux and WSL2 builds would share the kernel of the machine holding the keys."""
+    try:
+        runtimes = json.loads(await _quiet("docker", "info", "--format", "{{json .Runtimes}}"))
+    except ValueError:
+        runtimes = {}
+    if isinstance(runtimes, dict) and GVISOR in runtimes:
+        return GVISOR, "gVisor (runsc): builds run on a user-space kernel"
+    if sys.platform == "darwin":
+        return None, "Docker Desktop's Linux VM: builds never touch the macOS kernel"
+    return None, (
+        "WARNING: gVisor not found, builds share this machine's Linux kernel. "
+        "Install it (docs/OPS.md §4.1), then restart matrix up"
+    )
 
 
 async def _kill(proc: asyncio.subprocess.Process, container: str | None) -> None:

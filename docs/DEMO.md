@@ -25,9 +25,10 @@ the verify steps (its builder rejoins within ~5 s when the Wi-Fi is back).
 ### 0.1 Once per laptop
 
 Follow [docs/OPS.md](OPS.md) §1 to §5 on A, B, C and D: WSL2 mirrored networking, firewall rules
-for UDP 7788 and TCP 7700, Docker, the pinned Go image pre-pulled, the **same** Matrix checkout
-(same `network.toml`) with `pip install -e .`, and the hotspot ping check. On V: the Matrix
-checkout and `pip install -e .` only (no Docker needed).
+for UDP 7788 and TCP 7700, Docker with gVisor (§4), the **same** Matrix checkout (same
+`network.toml`) with `uv sync`, and the hotspot ping check. Run `matrix up` once at home: it pulls
+the pinned Go image, so the hotspot never has to. On V: the Matrix checkout and `uv sync` only
+(no Docker needed).
 
 ### 0.2 Values to fill in
 
@@ -45,9 +46,9 @@ every tag has its own hash):
 | Tag | Scene | Honest hash | Backdoored hash (`backdoor.patch`) |
 |---|---|---|---|
 | `v1.2.0` | 2 (happy path), 5 (old certificate) | `H120 = e432bbc584446abcbd1493a1bf29918ac2e2eb59de76bf70ee130a1d093fd1f5` | |
-| `v1.2.1` | 3 (SolarWinds), 5 | `H121 = 1ddd637bbb7565d2bc773dd923ef6600ce95f8997bc53b66ce1244a46caaea65` (one builder so far) | `BAD121 = TBD` |
-| `v1.2.2` | 6 (laptop drops off) | `H122 = TBD` | |
-| `v1.2.3` | 7 (caught cheater) | `H123 = TBD` | |
+| `v1.2.1` | 3 (SolarWinds), 5 | `H121 = 1ddd637bbb7565d2bc773dd923ef6600ce95f8997bc53b66ce1244a46caaea65` | `BAD121 = 0e86e0174e00d105d88152d91022f63200c03ebd1aa695fcb0e94facdbe6204b` |
+| `v1.2.2` | 6 (laptop drops off) | `H122 = 8c6e6bf6a0b83664e636abb851b9d0197231077e72f76a8a1e1932cbc16d40d8` | |
+| `v1.2.3` | 7 (caught cheater) | `H123 = a2771b9ac98466d59e0a46d86d06ffb07aae6916f88b681cec3439360228d538` | |
 | `v1.2.4` | spare | `H124 = TBD` | `BAD124 = TBD` |
 | `v1.2.5` | spare | `H125 = TBD` | `BAD125 = TBD` |
 | `v0.9.0-broken` | optional extra | `BUILD_FAILED` (exit 5) | |
@@ -362,7 +363,6 @@ Commits: `c v0.9.0-broken`, `c v0.9.1-norecipe` (§0.3).
 | `release` exits 4 | Fewer than 2 builders answered, the local node is not running (T1), or a wrong key or genesis. |
 | A scene must be repeated | A tag cannot be released twice (same request ID, same stored result): use the spare tags `v1.2.4`, `v1.2.5` with `C124`, `C125`. A repeated scene 3 changes the backdoored hash (`BAD124`) and the tag in scene 5. |
 | Scene 5 file lost | Copy it again from laptop C: `~/.matrix/data/artifacts/<BAD121>` (artifacts expire after 24 h). |
-| Hotspot or all networking fails | Last resort: run every scene on one machine with the compose dev network ([Appendix](#appendix-single-machine-rehearsal)). |
 
 ## 3. Exit codes on the slide
 
@@ -374,39 +374,6 @@ Commits: `c v0.9.0-broken`, `c v0.9.1-norecipe` (§0.3).
 | 3 | `PENDING` at timeout | | `PENDING` |
 | 4 | error | error | error |
 | 5 | `BUILD_FAILED` | | |
-
-## Appendix: single-machine rehearsal
-
-The development network: 8 builders in Docker Compose on one Linux or WSL2 machine, static `addr`s
-from `scripts/dev_genesis.py`, no ceremony and no discovery (n = 8, f = 2, T = 3, so votes and
-quorum counts differ from the laptop demo).
-
-```bash
-cp .env.example .env                       # set MATRIX_DATA (absolute), MATRIX_UID/GID, DOCKER_GID
-. ./.env && mkdir -p "$MATRIX_DATA" dist
-export REPO=https://github.com/ChaoticNebula5/matrix-hello IMAGE=golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
-python scripts/dev_genesis.py --out dev --addrs compose --profile demo --repo "$REPO" --image "$IMAGE"
-docker pull --platform linux/amd64 "$IMAGE"
-docker compose build && docker compose up -d && docker compose ps   # 8 x healthy
-alias mx='docker compose run --rm cli'
-mx tui                                     # second terminal
-```
-
-Use `c()` from §0.3 for the commits. Then run the scenes with `mx` instead of `matrix`:
-
-```bash
-mx release --repo "$REPO" --tag v1.2.0 --commit "$C120" \
-  --key /etc/matrix/keys/release.key --wait 600 --out dist/v1.2.0 --output hello
-```
-
-| Laptop scene | Compose equivalent |
-|---|---|
-| 1 founding, 4 imposter | Not applicable (static dev genesis). |
-| 3 SolarWinds | `docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builder3`; the backdoored file is `$MATRIX_DATA/builder3/artifacts/<BAD121>`. |
-| 5 swapped download | `matrix verify` with `--genesis dev/genesis.json --genesis-sha256 "$(cat dev/genesis.sha256)"`. |
-| 6 drop off | `docker compose stop builder7 builder8`, later `docker compose start builder7 builder8`. |
-| 7 cheater | Uncomment `builder2` in `docker-compose.faults.yml`, comment out the others, `up -d builder2`. |
-| reset | `docker compose up -d builderN` (honest again), or wipe everything: `docker compose down && sudo rm -rf "$MATRIX_DATA"/builder* && docker compose up -d`. |
 
 ## Pitch for the judges
 

@@ -1,4 +1,4 @@
-"""`matrix` CLI: keygen, release, status, verify, evidence, tui (RFC §7.11, LLD §3.13)."""
+"""`matrix` CLI: up, release, status, evidence, tui, verify, keygen, help (RFC §7.11, LLD §3.13)."""
 
 import argparse
 import asyncio
@@ -16,7 +16,7 @@ from typing import Any
 from aiohttp import ClientError
 
 from . import node
-from .builder import MAX_ARTIFACT  # one limit for building and downloading (RFC §4)
+from .builder import MAX_ARTIFACT, isolation  # one artifact limit for building and downloading
 from .canon import canonical_json, loads_strict
 from .crypto import keygen, load_key, pubkey_hex
 from .discovery import (
@@ -777,6 +777,38 @@ async def _keep_endorsing(data: bytes, seconds: float) -> None:
             await asyncio.sleep(FOUNDER_INTERVAL_S)
 
 
+async def _quiet_ok(*argv: str) -> bool:
+    p = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+    )
+    return await p.wait() == 0
+
+
+async def _docker_ready(images: Any) -> bool:
+    """Docker is reachable and every pinned toolchain image is present, pulled now if missing.
+    Without this a laptop's first build would spend its whole timeout downloading the image (or
+    fail on a stopped Docker) and silently abstain."""
+    try:
+        if not await _quiet_ok("docker", "version"):
+            _err("cannot reach Docker: start Docker Desktop or the docker service (docs/OPS.md §4)")
+            return False
+    except FileNotFoundError:
+        _err("docker not found: install Docker first (docs/OPS.md §4)")
+        return False
+    for image in sorted(set(images)):
+        if await _quiet_ok("docker", "image", "inspect", image):
+            continue
+        _out(f"pulling the pinned Go toolchain {image} (once per laptop)...")
+        p = await asyncio.create_subprocess_exec(
+            "docker", "pull", "--platform", "linux/amd64", image
+        )
+        if await p.wait() != 0:
+            _err(f"docker pull {image} failed: check the internet connection, then retry")
+            return False
+    _out(f"build isolation: {(await isolation())[1]}")
+    return True
+
+
 def cmd_up(a: argparse.Namespace) -> int:
     home = Path(a.home).expanduser() if a.home else Path.home() / ".matrix"
     try:
@@ -808,6 +840,9 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
         name = a.name or default_name()
         if not valid_name(name):
             _err(f"hostname gives an invalid name {name!r}: pass --name")
+            return EXIT_ERROR
+        # before the ceremony, so no founder waits for this laptop's download mid-founding
+        if not await _docker_ready(params["allowed_images"].values()):
             return EXIT_ERROR
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
@@ -852,6 +887,8 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
     if me is None:
         _err("this laptop's node key is not in the founded genesis")
         return EXIT_ERROR
+    if not await _docker_ready(g.allowed_images.values()):
+        return EXIT_ERROR
     args = argparse.Namespace(
         genesis=str(home / "genesis.json"),
         id=me.id,
@@ -884,57 +921,269 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
 
 # entry point
 
+_RAW = argparse.RawDescriptionHelpFormatter
+
+# The overview groups commands by what the person is doing; `matrix help` prints it.
+_GROUPS = (
+    ("Run this laptop's builder", ("up",)),
+    ("Publish a release", ("release", "status", "evidence", "tui")),
+    ("Check a binary (offline)", ("verify",)),
+    ("Other", ("keygen", "help")),
+)
+
+_EXIT_CODES = """\
+exit codes (only 0 is success; RFC §6.4):
+  0  CERTIFIED (release), REPRODUCED (verify), settled (status)
+  1  MISMATCH: the file is not the certified binary (verify)
+  2  INVALID_CERT (verify), NOT_REPRODUCIBLE (release)
+  3  PENDING: no quorum yet (release at --wait timeout, status)
+  4  error: bad usage, unreachable builders, wrong key or genesis
+  5  BUILD_FAILED: the builders confirmed a compile error (release)"""
+
+
+def _globals(p: argparse.ArgumentParser, *, top: bool) -> None:
+    """--genesis and --node, accepted before or after the command. After the command they
+    default to SUPPRESS, so a value given before the command is not overwritten with None."""
+    g = p.add_argument_group("global options")
+    default = {} if top else {"default": argparse.SUPPRESS}
+    g.add_argument(
+        "--genesis",
+        metavar="FILE",
+        help="genesis.json of the network (default $MATRIX_GENESIS, else ~/.matrix/genesis.json)",
+        **default,
+    )
+    g.add_argument(
+        "--node",
+        metavar="HOST:PORT",
+        help="this laptop's builder, used to find the others "
+        "(default $MATRIX_NODE, else 127.0.0.1:7700)",
+        **default,
+    )
+
+
+def _command(
+    sub: Any, name: str, summary: str, description: str, examples: str, exits: str = ""
+) -> argparse.ArgumentParser:
+    epilog = "examples:\n" + examples + (f"\n\nexit codes: {exits}" if exits else "")
+    return sub.add_parser(
+        name,
+        prog=f"matrix {name}",
+        add_help=False,
+        help=summary,
+        description=description,
+        epilog=epilog,
+        formatter_class=_RAW,
+    )
+
+
+def _options(s: argparse.ArgumentParser) -> Any:
+    o = s.add_argument_group("options")
+    o.add_argument("-h", "--help", action="help", help="show this help and exit")
+    return o
+
+
+def _overview(sub: Any) -> str:
+    summaries = {a.dest: a.help for a in sub._choices_actions}
+    lines = ["commands:"]
+    for title, names in _GROUPS:
+        lines.append(f"  {title}")
+        lines += [f"    {n:<10}  {summaries[n]}" for n in names]
+    lines += ["", _EXIT_CODES, "", "Run 'matrix help COMMAND' for a command's options."]
+    return "\n".join(lines)
+
 
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="matrix", description="Matrix release gate")
-    p.add_argument("--genesis", help="genesis.json (default $MATRIX_GENESIS or ~/.matrix/)")
-    p.add_argument("--node", help="local builder HOST:PORT (default $MATRIX_NODE, 127.0.0.1:7700)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p = argparse.ArgumentParser(
+        prog="matrix",
+        usage="matrix [--genesis FILE] [--node HOST:PORT] COMMAND [options]",
+        description="Matrix: a Byzantine-tolerant release gate for Go binaries.\n"
+        "Independent builders each build a tagged commit; a release is certified when f+1\n"
+        "of them signed the same hash, and anyone can check the certificate offline.",
+        formatter_class=_RAW,
+    )
+    _globals(p, top=True)
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND", help=argparse.SUPPRESS)
 
-    s = sub.add_parser("keygen", help="generate an Ed25519 key; prints the public key")
-    s.add_argument("--out", required=True)
-    s.set_defaults(fn=cmd_keygen)
+    s = _command(
+        sub,
+        "up",
+        "found the network on first run (ceremony), then run this laptop's builder",
+        "Start this laptop's builder. On the first run (no ~/.matrix/genesis.json) it first runs\n"
+        "the founding ceremony with the other laptops on the LAN: founders appear by UDP\n"
+        "broadcast, Enter seals, everyone compares the short code aloud and confirms with y.\n"
+        "Run it from the repo checkout: the network parameters come from ./network.toml.\n"
+        "Ctrl-C stops the builder.",
+        "  matrix up --name laptop-a     # first run: ceremony, then the builder\n"
+        "  matrix up                     # later runs: no ceremony\n"
+        "  matrix up --allow-faults --fault inject --patch examples/faults/backdoor.patch",
+        "0 stopped cleanly, 4 error (ceremony aborted, wrong keys, port in use)",
+    )
+    o = _options(s)
+    o.add_argument(
+        "--name",
+        metavar="NAME",
+        help="this laptop's name in genesis, [A-Za-z0-9_-]{1,24} (default: from the hostname)",
+    )
+    o.add_argument(
+        "--home", metavar="DIR", help="state directory: keys, genesis, data (default ~/.matrix)"
+    )
+    o.add_argument(
+        "--refound",
+        action="store_true",
+        help="found a new network; the old one moves to DIR/old-<short code>/",
+    )
+    o.add_argument(
+        "--advertise",
+        metavar="IPv4:PORT",
+        help="address put in hellos (default: this laptop's LAN address, port 7700)",
+    )
+    f = s.add_argument_group("demo faults (inert without --allow-faults; never more than f)")
+    f.add_argument("--allow-faults", action="store_true", help="enable a fault mode")
+    f.add_argument(
+        "--fault", choices=node._MODES, metavar="MODE", help="one of: " + ", ".join(node._MODES)
+    )
+    f.add_argument("--patch", metavar="FILE", help="patch applied before building (inject)")
+    f.add_argument("--hash", metavar="HEX", help="64-hex hash to vote for (collude)")
+    s.set_defaults(fn=cmd_up)
 
-    s = sub.add_parser("verify", help="check a binary against its certificate, offline")
-    s.add_argument("file")
-    s.add_argument("--cert", required=True)
-    s.add_argument("--repo", required=True)
-    s.add_argument("--tag", required=True)
-    s.add_argument("--commit")
-    s.add_argument("--genesis-sha256", help="pinned genesis hash (default ~/.matrix/)")
-    s.set_defaults(fn=cmd_verify)
-
-    s = sub.add_parser("release", help="sign, submit, wait for a quorum, write the certificate")
-    s.add_argument("--repo", required=True)
-    s.add_argument("--tag", required=True)
-    s.add_argument("--commit", required=True)
-    s.add_argument("--key", help="release-signer key (default ~/.matrix/keys/release.key)")
-    s.add_argument("--wait", type=int, default=600, help="seconds (default 600)")
-    s.add_argument("--out", default="dist")
-    s.add_argument("--output", help="artifact file name (default: repo name)")
+    s = _command(
+        sub,
+        "release",
+        "sign a release, wait for a quorum, download the binary and its certificate",
+        "Sign a release request for REPO@TAG at COMMIT with this laptop's release key, submit it\n"
+        "until f+1 distinct operators accepted it, and wait for the verdict. On CERTIFIED,\n"
+        "download the binary from a builder that voted for the certified hash and write\n"
+        "DIR/NAME and DIR/NAME.matrix.json (the certificate).",
+        "  matrix release --repo https://github.com/ChaoticNebula5/matrix-hello --tag v1.2.0 \\\n"
+        "      --commit fb6881c6e2432fa107ef809af109a9a1344ed2c0 --out dist/v1.2.0",
+        "0 CERTIFIED, 2 NOT_REPRODUCIBLE, 3 PENDING at --wait, 4 error, 5 BUILD_FAILED",
+    )
+    r = s.add_argument_group("required")
+    r.add_argument("--repo", required=True, metavar="URL", help="https://github.com/OWNER/REPO")
+    r.add_argument("--tag", required=True, metavar="TAG", help="git tag, e.g. v1.2.0")
+    r.add_argument(
+        "--commit", required=True, metavar="SHA", help="40-hex commit the tag points to (signed)"
+    )
+    o = _options(s)
+    o.add_argument(
+        "--key", metavar="FILE", help="release-signer key (default ~/.matrix/keys/release.key)"
+    )
+    o.add_argument(
+        "--wait",
+        type=int,
+        default=600,
+        metavar="SECONDS",
+        help="give up with PENDING after this long (default 600)",
+    )
+    o.add_argument(
+        "--out", default="dist", metavar="DIR", help="where to write the files (default dist)"
+    )
+    o.add_argument("--output", metavar="NAME", help="binary file name (default: the repo name)")
+    _globals(s, top=False)
     s.set_defaults(fn=cmd_release)
 
-    s = sub.add_parser("status", help="per-builder results and verdict for a request ID")
-    s.add_argument("id")
+    s = _command(
+        sub,
+        "status",
+        "per-builder votes and the verdict for one request",
+        "Ask the builders for their votes on one request and print the verdict, one row per\n"
+        "builder. `matrix release` prints the request ID.",
+        "  matrix status e573fc998fa7716c4681a03735619f1fb3fe13fd9e70acc56331511c169e67b8",
+        "0 settled, 3 PENDING, 4 error",
+    )
+    s.add_argument("id", metavar="REQUEST_ID", help="64-hex request ID")
+    _options(s)
+    _globals(s, top=False)
     s.set_defaults(fn=cmd_status)
 
-    s = sub.add_parser("evidence", help="evidence collected by all builders")
-    s.add_argument("--since", default="1h")
+    s = _command(
+        sub,
+        "evidence",
+        "signed proof of misbehaviour (equivocation) collected by the builders",
+        "Print the evidence the builders collected, such as a builder that signed two different\n"
+        "results for one request (EQUIVOCATION). Every proof is re-checked against the genesis\n"
+        "public keys.",
+        "  matrix evidence --since 1h",
+        "0 ok (also with no evidence), 4 error",
+    )
+    o = _options(s)
+    o.add_argument(
+        "--since", default="1h", metavar="AGE", help="how far back: 30s, 10m, 1h, 2d (default 1h)"
+    )
+    _globals(s, top=False)
     s.set_defaults(fn=cmd_evidence)
 
-    s = sub.add_parser("tui", help="live view of builders, releases and evidence")
+    s = _command(
+        sub,
+        "tui",
+        "live dashboard: builders, releases and evidence",
+        "Full-screen live view of the network through this laptop's builder. Keys: b builders,\n"
+        "r releases, Enter detail, l log (this laptop's builder only), e evidence, q quit.",
+        "  matrix tui",
+        "0 on quit, 4 error",
+    )
+    _options(s)
+    _globals(s, top=False)
     s.set_defaults(fn=cmd_tui)
 
-    s = sub.add_parser("up", help="found the network if needed (ceremony), then run the builder")
-    s.add_argument("--name", help="this laptop's name (default: hostname)")
-    s.add_argument("--home", help="state directory (default ~/.matrix)")
-    s.add_argument("--refound", action="store_true", help="found a new network")
-    s.add_argument("--advertise", help="address put in hellos, <IPv4>:<port>")
-    s.add_argument("--allow-faults", action="store_true")
-    s.add_argument("--fault", choices=node._MODES)
-    s.add_argument("--patch")
-    s.add_argument("--hash")
-    s.set_defaults(fn=cmd_up)
+    s = _command(
+        sub,
+        "verify",
+        "check a binary against its certificate; needs no network",
+        "Check, offline, that FILE is the binary the certificate certifies for the repo and tag\n"
+        "YOU expect (never taken from the certificate), under the pinned genesis. Only exit 0\n"
+        "means the file may be used.",
+        "  matrix verify dist/v1.2.0/hello --cert dist/v1.2.0/hello.matrix.json \\\n"
+        "      --repo https://github.com/ChaoticNebula5/matrix-hello --tag v1.2.0",
+        "0 REPRODUCED, 1 MISMATCH, 2 INVALID_CERT, 4 error",
+    )
+    s.add_argument("file", metavar="FILE", help="the binary to check")
+    r = s.add_argument_group("required")
+    r.add_argument("--cert", required=True, metavar="FILE", help="its .matrix.json certificate")
+    r.add_argument("--repo", required=True, metavar="URL", help="the repo you expect")
+    r.add_argument("--tag", required=True, metavar="TAG", help="the tag you expect")
+    o = _options(s)
+    o.add_argument("--commit", metavar="SHA", help="also require this commit")
+    o.add_argument(
+        "--genesis-sha256",
+        metavar="HEX",
+        help="pinned genesis hash (default ~/.matrix/genesis.sha256)",
+    )
+    _globals(s, top=False)
+    s.set_defaults(fn=cmd_verify)
+
+    s = _command(
+        sub,
+        "keygen",
+        "generate an Ed25519 key file and print its public key",
+        "Write a new Ed25519 signing key (64-hex seed, mode 0600) and print its public key.\n"
+        "`matrix up` creates this laptop's own keys; keygen is for extra keys, e.g. CI.",
+        "  matrix keygen --out ~/.matrix/keys/ci-release.key",
+        "0 written, 4 error",
+    )
+    r = s.add_argument_group("required")
+    r.add_argument("--out", required=True, metavar="FILE", help="where to write the private key")
+    _options(s)
+    s.set_defaults(fn=cmd_keygen)
+
+    s = _command(
+        sub,
+        "help",
+        "show this overview, or one command's options",
+        "Show the overview, or the full help of one command.",
+        "  matrix help\n  matrix help release",
+    )
+    s.add_argument(
+        "topic", nargs="?", choices=tuple(sub.choices), metavar="COMMAND", help="command to explain"
+    )
+    _options(s)
+
+    def cmd_help(a: argparse.Namespace) -> int:
+        _out((sub.choices[a.topic] if a.topic else p).format_help().rstrip("\n"))
+        return EXIT_OK
+
+    s.set_defaults(fn=cmd_help)
+    p.epilog = _overview(sub)
     return p
 
 
@@ -944,6 +1193,9 @@ def run(argv: list[str] | None = None) -> int:
         a = p.parse_args(argv)
     except SystemExit as e:  # argparse exits 2 on bad usage; 2 means INVALID here, so remap
         return EXIT_OK if e.code == 0 else EXIT_ERROR
+    if a.cmd is None:  # bare `matrix`: show what there is, but it is not a successful command
+        sys.stderr.write(p.format_help())
+        return EXIT_ERROR
     try:
         return a.fn(a)
     except Exception as e:  # noqa: BLE001  fail closed: an unexpected error is never success

@@ -1,18 +1,19 @@
-# Single-machine Matrix network: 8 builders on 4 simulated operators (laptopA..D), or 4 builders,
-# one per operator (the rev 5 demo shape). Linux or WSL2 only. Setup: docs/LLD.md §12, AGENTS.md "Run it".
+# Single-machine copy of the demo network: 4 builders, one per simulated laptop (builder1..4 =
+# laptopA..D), n = 4, f = 1, threshold 2, exactly as on the 4 laptops. For rehearsing the scenes on
+# one machine and as the last-resort fallback (docs/DEMO.md appendix). Linux or WSL2 only.
 #
-#   cp .env.example .env            # then edit it; COMPOSE_PROFILES there must match --nodes
+#   cp .env.example .env            # then edit it
 #   docker pull --platform linux/amd64 golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
-#   python scripts/dev_genesis.py --out dev --addrs compose --profile demo --nodes 8 \
+#   python scripts/dev_genesis.py --out dev --addrs compose --profile demo --nodes 4 \
 #       --repo https://github.com/ChaoticNebula5/matrix-hello \
 #       --image golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
-#   docker compose up -d --build    # builder1..8 with COMPOSE_PROFILES=eight, builder1..4 without
+#   docker compose up -d --build
 #   docker compose run --rm cli release --repo https://github.com/ChaoticNebula5/matrix-hello \
 #       --tag v1.2.0 --commit fb6881c6e2432fa107ef809af109a9a1344ed2c0 \
 #       --key /etc/matrix/keys/release.key --wait 600 --out dist/
 #   docker compose run --rm cli tui
 #
-# Not for the laptop demo: there every laptop runs `matrix up` natively (docs/OPS.md, DEMO.md) and
+# Not used on the laptops: there every laptop runs `matrix up` natively (docs/OPS.md, DEMO.md) and
 # Docker only runs the builds. A containerized node cannot do discovery on Docker Desktop, whose
 # network is its own VM (192.168.65.x), not the laptop's hotspot address.
 #
@@ -42,46 +43,22 @@ x-builder: &builder
     retries: 3
 
 services:
-  # laptopA
-  builder1:
+  builder1:  # laptopA (publisher)
     <<: *builder
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder1, --key, /etc/matrix/keys/builder1.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder1"]
     ports: ["127.0.0.1:7700:7700"]
-  builder2:
+  builder2:  # laptopB (equivocates in scene 7)
     <<: *builder
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder2, --key, /etc/matrix/keys/builder2.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder2"]
     ports: ["127.0.0.1:7701:7700"]
-  # laptopB
-  builder3:
+  builder3:  # laptopC (injects a backdoor in scene 3)
     <<: *builder
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder3, --key, /etc/matrix/keys/builder3.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder3"]
     ports: ["127.0.0.1:7702:7700"]
-  builder4:
+  builder4:  # laptopD (drops off in scene 6)
     <<: *builder
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder4, --key, /etc/matrix/keys/builder4.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder4"]
     ports: ["127.0.0.1:7703:7700"]
-  # laptopC
-  builder5:
-    <<: *builder
-    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
-    command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder5, --key, /etc/matrix/keys/builder5.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder5"]
-    ports: ["127.0.0.1:7704:7700"]
-  builder6:
-    <<: *builder
-    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
-    command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder6, --key, /etc/matrix/keys/builder6.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder6"]
-    ports: ["127.0.0.1:7705:7700"]
-  # laptopD
-  builder7:
-    <<: *builder
-    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
-    command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder7, --key, /etc/matrix/keys/builder7.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder7"]
-    ports: ["127.0.0.1:7706:7700"]
-  builder8:
-    <<: *builder
-    profiles: [eight]  # not in a --nodes 4 genesis; it would restart forever
-    command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder8, --key, /etc/matrix/keys/builder8.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder8"]
-    ports: ["127.0.0.1:7707:7700"]
 
   # One-off CLI / TUI inside the compose network (builderN:7700 resolves here, not on the host).
   cli:
@@ -92,10 +69,10 @@ services:
     working_dir: /work
     environment:
       MATRIX_GENESIS: /etc/matrix/genesis.json
-      MATRIX_NODE: builder1:7700  # the cli's "local builder" (laptopA)
+      MATRIX_NODE: builder1:7700  # the cli runs "on laptop A"
     volumes:
       - ./dev/genesis.json:/etc/matrix/genesis.json:ro
       - ./dev/keys/release.key:/etc/matrix/keys/release.key:ro
-      - ./dist:/work/dist
+      - ${MATRIX_DIST:-./dist}:/work/dist  # .env: MATRIX_DIST for a checkout on a Windows drive
     stdin_open: true
     tty: true

@@ -71,7 +71,7 @@ async def run(args: argparse.Namespace) -> None:
     discovery = not getattr(args, "no_discovery", False)
     if advertise is not None and not valid_addr(advertise):
         raise ValueError("--advertise must be <IPv4>:<port>")
-    from matrix.builder import BuildEnv, cleanup_startup, expire_artifacts
+    from matrix.builder import BuildEnv, cleanup_startup, expire_artifacts, isolation
     from matrix.crypto import load_key, pubkey_hex
     from matrix.genesis import load_genesis
     from matrix.protocol import Engine
@@ -87,7 +87,9 @@ async def run(args: argparse.Namespace) -> None:
     data_dir = Path(args.data).resolve()
     for subdir in ("work", "logs", "artifacts"):
         (data_dir / subdir).mkdir(parents=True, exist_ok=True)
-    env = BuildEnv(str(data_dir), me.id, os.getuid(), os.getgid())
+    runtime, how = await isolation()
+    logging.getLogger(__name__).info("%s build isolation: %s", me.id, how)
+    env = BuildEnv(str(data_dir), me.id, os.getuid(), os.getgid(), runtime)
     store = Store(str(data_dir / "matrix.db"))
     book = AddressBook(g)
     peers = PeerClient(g, me, book)

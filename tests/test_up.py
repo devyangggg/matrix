@@ -25,6 +25,7 @@ PARAMS = {
     "sync_interval_s": 5,
 }
 NAMES = ["laptop-a", "laptop-b", "laptop-c", "laptop-d"]
+DOCKER_READY = cli._docker_ready  # the real one; the `home` fixture replaces it with a fake
 TOML = (
     '[network]\nname = "matrix-demo"\nallowed_repos = ["https://github.com/org/hello"]\n'
     'allowed_images = { "go1.23" = "golang@sha256:' + "a" * 64 + '" }\n'
@@ -200,8 +201,12 @@ def home(tmp_path, monkeypatch):
     async def no_broadcast(data, seconds):
         calls.append(("endorse", data))
 
+    async def docker_ok(images):
+        return True
+
     monkeypatch.setattr(cli.node, "run", fake_run)
     monkeypatch.setattr(cli, "_keep_endorsing", no_broadcast)
+    monkeypatch.setattr(cli, "_docker_ready", docker_ok)
     return h, calls
 
 
@@ -346,6 +351,85 @@ def test_up_needs_network_toml(home, monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
     assert "network.toml" in capsys.readouterr().err
+
+
+def test_up_checks_docker_before_the_ceremony(home, monkeypatch):
+    h, calls = home
+
+    async def docker_down(images):
+        return False
+
+    async def must_not_run(*args, **kw):
+        raise AssertionError("ceremony must not start without Docker")
+
+    monkeypatch.setattr(cli, "_docker_ready", docker_down)
+    monkeypatch.setattr(cli, "ceremony", must_not_run)
+    assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
+    assert calls == [] and not h.exists()  # no keys, no files: run again once Docker is up
+
+
+class FakeDocker:
+    """Stands in for asyncio.create_subprocess_exec; records argv, exits per `codes`."""
+
+    def __init__(self, codes=None, missing=False):
+        self.codes, self.missing, self.argv = codes or {}, missing, []
+
+    async def __call__(self, *argv, **kw):
+        if self.missing:
+            raise FileNotFoundError("docker")
+        self.argv.append(argv)
+        code = self.codes.get(argv[1], 0)
+
+        class Proc:
+            async def wait(self):
+                return code
+
+        return Proc()
+
+
+IMAGE = "golang@sha256:" + "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def _fixed_isolation(monkeypatch):
+    async def gvisor():
+        return "runsc", "gVisor (runsc): builds run on a user-space kernel"
+
+    monkeypatch.setattr(cli, "isolation", gvisor)
+
+
+async def test_docker_ready_pulls_a_missing_image_once(monkeypatch, capsys):
+    fake = FakeDocker(codes={"image": 1})  # `docker image inspect` fails: not present
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake)
+    assert await DOCKER_READY([IMAGE, IMAGE])
+    assert fake.argv == [
+        ("docker", "version"),
+        ("docker", "image", "inspect", IMAGE),
+        ("docker", "pull", "--platform", "linux/amd64", IMAGE),
+    ]
+    out = capsys.readouterr().out
+    assert "pulling the pinned Go toolchain" in out and "build isolation: gVisor" in out
+
+
+async def test_docker_ready_skips_a_present_image(monkeypatch):
+    fake = FakeDocker()
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake)
+    assert await DOCKER_READY([IMAGE])
+    assert [a[1] for a in fake.argv] == ["version", "image"]
+
+
+@pytest.mark.parametrize(
+    "fake, message",
+    [
+        (FakeDocker(missing=True), "docker not found"),
+        (FakeDocker(codes={"version": 1}), "cannot reach Docker"),
+        (FakeDocker(codes={"image": 1, "pull": 1}), "docker pull"),
+    ],
+)
+async def test_docker_ready_explains_what_is_wrong(monkeypatch, capsys, fake, message):
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake)
+    assert not await DOCKER_READY([IMAGE])
+    assert message in capsys.readouterr().err
 
 
 def _double_enter(queue: asyncio.Queue):

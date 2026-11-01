@@ -1,41 +1,23 @@
-# Demo fault overrides (RFC §7.14, rev 5 §9.2). Edit, then restart only the builders you changed:
+# Demo faults for the single-machine network (RFC §7.14, rev 5 §9.2), same laptops as the demo.
+# Always name the ONE builder to restart (f = 1: never two faulty builders at once):
 #
-#   docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builder3
+#   docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builder3   # scene 3
+#   docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builder2   # scene 7
 #
-# Reset a builder to honest with: docker compose up -d builder3
-# Keep at most f builders faulty at once: f = 1 with a --nodes 4 genesis, f = 2 with --nodes 8
-# (crash is honest and does not count toward f). With 4 builders, builder3 is laptopC and builder2
-# is laptopB, exactly as in the laptop demo; with 8, they are laptopB and laptopA.
+# Reset to honest: docker compose up -d builder3   (or builder2)
 services:
-  # Scene 3 (SolarWinds): builder3 applies a backdoor patch before building.
+  # Scene 3 (SolarWinds): laptopC applies a backdoor patch before building.
   builder3:
     command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder3, --key, /etc/matrix/keys/builder3.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder3",
               --allow-faults, --fault, inject, --patch, /etc/matrix/faults/backdoor.patch]
     volumes:
       - ./examples/faults:/etc/matrix/faults:ro
 
-  # 8 builders only (f = 2; no rev 5 laptop scene): a whole compromised laptop. Restart builder3
-  # honest first, uncomment both and set BACKDOOR_HASH in .env. Two votes stay below the
-  # three-builder threshold.
-  # builder5:
-  #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder5, --key, /etc/matrix/keys/builder5.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder5",
-  #             --allow-faults, --fault, collude, --hash, "${BACKDOOR_HASH:?set backdoor hash}"]
-  # builder6:
-  #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder6, --key, /etc/matrix/keys/builder6.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder6",
-  #             --allow-faults, --fault, collude, --hash, "${BACKDOOR_HASH:?set backdoor hash}"]
+  # Scene 7 (caught cheater): laptopB signs two different results for one request.
+  builder2:
+    command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder2, --key, /etc/matrix/keys/builder2.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder2",
+              --allow-faults, --fault, equivocate]
 
-  # Scene 7 (caught cheater): start it alone, after resetting builder3 when f = 1.
-  # builder2:
-  #   command: [matrix-node, --genesis, /etc/matrix/genesis.json, --id, builder2, --key, /etc/matrix/keys/builder2.key, --listen, "0.0.0.0:7700", --data, "${MATRIX_DATA}/builder2",
-  #             --allow-faults, --fault, equivocate]
-
-  # Other fault-matrix scenes: apply one command at a time to a chosen builder.
-  # --allow-faults --fault lie          (random dishonest vote)
-  # --allow-faults --fault stall        (no vote, no build)
-  # --allow-faults --fault bad-artifact (valid vote, corrupted download)
-  # --allow-faults --fault equivocate   (two signed, conflicting votes)
-
-  # crash: also set restart: "no", otherwise compose restarts it in a loop.
-  # builder7:
-  #   restart: "no"
-  #   command: [..., --allow-faults, --fault, crash]
+  # Other modes for experiments, one builder at a time (edit a command above):
+  #   --fault lie (random dishonest vote), stall (no vote), bad-artifact (valid vote, corrupted
+  #   download), crash (also set restart: "no", or compose restarts it in a loop)
