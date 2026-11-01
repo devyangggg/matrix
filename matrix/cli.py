@@ -1188,6 +1188,14 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
         if not valid_name(name):
             _err(f"hostname gives an invalid name {name!r}: pass --name")
             return EXIT_ERROR
+        old = await _running_builder()
+        if old is not None:
+            _err(
+                f"a builder is already running here (node {old.get('node_id')}, genesis "
+                f"{str(old.get('genesis_hash'))[:16]}): it still holds the old network, even if "
+                "~/.matrix was deleted. Stop that `matrix up` (Ctrl-C) and run this again"
+            )
+            return EXIT_ERROR
         # before the ceremony, so no founder waits for this laptop's download mid-founding
         log.info("up: checking Docker and the pinned images")
         if not await _docker_ready(params["allowed_images"].values()):
@@ -1291,6 +1299,16 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
             extra.cancel()
             await asyncio.gather(extra, return_exceptions=True)
     return EXIT_OK
+
+
+async def _running_builder(local: str = "127.0.0.1:7700") -> dict | None:
+    """/v1/health of a builder already answering on this laptop, or None."""
+    peers = PeerClient(Genesis.__new__(Genesis), CLIENT)  # only get_json_at is used
+    try:
+        h = await peers.get_json_at(f"http://{local}/v1/health")
+    finally:
+        await peers.close()
+    return h if isinstance(h, dict) else None
 
 
 async def _wait_listening(local: str, task: "asyncio.Task", seconds: float = 30) -> None:

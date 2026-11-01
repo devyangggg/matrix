@@ -396,6 +396,11 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.node, "run", fake_run)
     monkeypatch.setattr(cli, "_keep_endorsing", no_broadcast)
     monkeypatch.setattr(cli, "_docker_ready", docker_ok)
+
+    async def nothing_running():
+        return None
+
+    monkeypatch.setattr(cli, "_running_builder", nothing_running)
     return h, calls
 
 
@@ -568,6 +573,23 @@ def test_up_checks_docker_before_the_ceremony(home, monkeypatch):
     monkeypatch.setattr(cli, "ceremony", must_not_run)
     assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
     assert calls == [] and not h.exists()  # no keys, no files: run again once Docker is up
+
+
+def test_up_refuses_to_found_while_an_old_builder_still_runs(home, monkeypatch, capsys):
+    # Deleting ~/.matrix does not stop the process that still holds the old genesis and database.
+    h, _ = home
+
+    async def old_builder():
+        return {"node_id": "gur", "genesis_hash": "ab" * 32}
+
+    async def must_not_run(*a, **kw):
+        raise AssertionError("the ceremony must not start")
+
+    monkeypatch.setattr(cli, "_running_builder", old_builder)
+    monkeypatch.setattr(cli, "ceremony", must_not_run)
+    assert cli.run(["up", "--home", str(h), "--name", "laptop-a"]) == 4
+    err = capsys.readouterr().err
+    assert "already running" in err and "gur" in err and not h.exists()
 
 
 class FakeDocker:
