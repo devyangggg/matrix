@@ -261,8 +261,7 @@ target-version = "py311"
 - Python 3.11+, Docker, git.
 
 ```bash
-python3.11 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
+uv sync && . .venv/bin/activate   # or: python3.11 -m venv .venv, then pip install -e ".[dev]"
 ruff check . && ruff format --check .
 pytest -q                       # unit tests: fast, no Docker, no network
 pytest -q -m integration        # needs Docker + network (B3, B4, C6)
@@ -391,7 +390,7 @@ These are the security of the system. A change that weakens one is wrong even if
 6. **`FAILED` is a vote only for a deterministic, rerun-confirmed compile error** (LLD §3.8). Every environmental problem is `ERROR` and **abstains**. `BAD_REF` and `BAD_RECIPE` abstain.
 7. **Persist before broadcast.** Commit the own attestation to SQLite, then send it. Never sign two different results for one request (except the `equivocate` demo fault).
 8. **Subprocesses use argument lists** (`create_subprocess_exec`). Never `shell=True`, never string-built commands.
-9. **Build sandbox flags are not optional:** pinned image digest from genesis, `--platform linux/amd64`, `--user uid:gid`, `--cap-drop ALL`, `no-new-privileges`, resource limits, `--network none` for the build step, read-only source and module mounts, `GOTOOLCHAIN=local`, `GOPROXY=https://proxy.golang.org` (no `direct`), ldflags allowlist.
+9. **Build sandbox flags are not optional:** gVisor (`--runtime runsc`) whenever the Docker daemon has it (`builder.isolation()`), pinned image digest from genesis, `--platform linux/amd64`, `--user uid:gid`, `--cap-drop ALL`, `no-new-privileges`, resource limits, `--network none` for the build step, read-only source and module mounts, `GOTOOLCHAIN=local`, `GOPROXY=https://proxy.golang.org` (no `direct`), ldflags allowlist.
 10. **Never join user input onto a filesystem path.** Validate IDs and hashes with `re.fullmatch(..., re.ASCII)` first; look artifacts up in the DB.
 11. **Fail closed.** Only exit code 0 means success (RFC §6.4).
 12. Fault modes are inert unless the node was started with `--allow-faults`.
@@ -440,16 +439,18 @@ Dockerfile docker-compose.yml docker-compose.faults.yml .env.example
 Once per laptop, follow [docs/OPS.md](docs/OPS.md): WSL2 with mirrored networking on Windows, firewall open for UDP 7788 and TCP 7700, Docker, the same repo checkout (same `network.toml`), all laptops on the phone hotspot.
 
 ```bash
-python3.11 -m venv .venv && . .venv/bin/activate && pip install -e .
-docker pull --platform linux/amd64 golang@sha256:<digest>
-matrix up                     # on every laptop: founders appear, Enter to seal,
+git clone https://github.com/ChaoticNebula5/Matrix ~/Matrix && cd ~/Matrix
+uv sync && . .venv/bin/activate   # Python 3.11 + dependencies; then `matrix help`
+matrix up                     # checks Docker, pulls the pinned Go image if missing, reports
+                              # gVisor; on every laptop: founders appear, Enter to seal,
                               # read the short code aloud, confirm with y; the builder then runs
 # laptop A (publisher): matrix tui in a second terminal, then in a third:
-matrix release --repo https://github.com/<org>/matrix-hello --tag v1.2.0 --commit <sha> \
+matrix release --repo https://github.com/ChaoticNebula5/matrix-hello --tag v1.2.0 \
+  --commit fb6881c6e2432fa107ef809af109a9a1344ed2c0 \
   --wait 600 --out dist/      # key ~/.matrix/keys/release.key, addresses from the local node
 # any machine with Wi-Fi off, using the published genesis.json and pin:
-matrix verify dist/hello --cert dist/hello.matrix.json \
-  --repo https://github.com/<org>/matrix-hello --tag v1.2.0
+matrix verify dist/matrix-hello --cert dist/matrix-hello.matrix.json \
+  --repo https://github.com/ChaoticNebula5/matrix-hello --tag v1.2.0
 ```
 
 Later runs of `matrix up` reuse `~/.matrix/genesis.json` and skip the ceremony. Demo faults: restart one laptop's node with `matrix up --allow-faults --fault MODE [--patch FILE] [--hash HEX]`. Never more than one faulty builder at a time (f = 1).
@@ -457,18 +458,22 @@ Later runs of `matrix up` reuse `~/.matrix/genesis.json` and skip the ceremony. 
 ### 15.2 Single machine (development)
 
 ```bash
+The demo network (4 builders, n = 4, f = 1) on one machine:
+
+```bash
 cp .env.example .env                         # set MATRIX_DATA (absolute), UIDs, DOCKER_GID
 mkdir -p "$MATRIX_DATA" dist
-docker buildx imagetools inspect golang:1.23 # copy the linux/amd64 digest (H4)
-python scripts/dev_genesis.py --out dev --addrs compose --profile demo \
-  --repo https://github.com/<org>/matrix-hello --image golang@sha256:<digest>
-docker pull --platform linux/amd64 golang@sha256:<digest>
+python scripts/dev_genesis.py --out dev --addrs compose --profile demo --nodes 4 \
+  --repo https://github.com/ChaoticNebula5/matrix-hello \
+  --image golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
+docker pull --platform linux/amd64 golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689
 docker compose up -d --build
-docker compose run --rm cli release --repo https://github.com/<org>/matrix-hello \
-  --tag v1.2.0 --commit <sha> --key /etc/matrix/keys/release.key --wait 600 --out dist/
+docker compose run --rm cli release --repo https://github.com/ChaoticNebula5/matrix-hello \
+  --tag v1.2.0 --commit fb6881c6e2432fa107ef809af109a9a1344ed2c0 \
+  --key /etc/matrix/keys/release.key --wait 600 --out dist/
 docker compose run --rm cli tui
 ```
 
-Without Docker Compose: `python scripts/dev_genesis.py --addrs local ...` and start 8 `matrix-node` processes on `127.0.0.1:7700–7707` (or use `tests/integration/harness.py` from C6).
+Without Docker Compose: `python scripts/dev_genesis.py --nodes 4 --addrs local ...` and start 4 `matrix-node` processes on `127.0.0.1:7700–7703` (or use `tests/integration/harness.py` from C6).
 
-Demo faults: edit [docker-compose.faults.yml](docker-compose.faults.yml), then `docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builderN`. Never more than f malicious builders at once (2 in the 8-builder compose network; 1 with `dev_genesis.py --nodes 4`). For `--nodes 4`, clear `COMPOSE_PROFILES` in `.env` so only builder1..4 start.
+Demo faults: `docker compose -f docker-compose.yml -f docker-compose.faults.yml up -d builder3` (scene 3, inject) or `... up -d builder2` (scene 7, equivocate). One faulty builder at a time (f = 1); `docker compose up -d builderN` resets it.

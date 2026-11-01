@@ -15,11 +15,11 @@ operator. Do §1 to §5 once per laptop, then found the network together (§6). 
 | Item | Value |
 |---|---|
 | OS | Linux (e.g. Debian), macOS (Apple Silicon too, §3.1), or Windows 11 with **WSL2** (run Python, Docker and `matrix` from WSL2, never PowerShell) |
-| Python | 3.11+ |
-| Docker | Docker Desktop (Windows with WSL integration, macOS), or Docker Engine (Linux). It only runs the builds |
+| Python | nothing to install: [uv](https://docs.astral.sh/uv/) fetches Python 3.11 (`.python-version`) |
+| Docker | Docker Engine (Linux, and inside WSL2) with gVisor, or Docker Desktop on macOS (§4). It only runs the builds |
 | Inbound ports | **UDP 7788** (discovery hellos and ceremony), **TCP 7700** (builder API) |
 | Matrix | the **same commit** of this repo on every laptop (same `network.toml`) |
-| Go image | the pinned `golang@sha256:<digest>` (AGENTS H4), pre-pulled |
+| Go image | the pinned `golang@sha256:<digest>` (AGENTS H4); `matrix up` pulls it if missing |
 
 ## 2. Windows: WSL2 mirrored networking and firewall
 
@@ -70,14 +70,12 @@ sudo ufw allow 7788/udp && sudo ufw allow 7700/tcp                      # ufw
 sudo firewall-cmd --add-port=7788/udp --add-port=7700/tcp               # firewalld (until reboot)
 ```
 
-Docker Engine with your user in the `docker` group (Debian: `sudo apt install docker.io`, then
-`sudo usermod -aG docker $USER` and log in again).
+Docker Engine and gVisor: §4.
 
 ### 3.1 macOS laptops (Apple Silicon included)
 
 No WSL step; run everything in Terminal.
 
-- Python 3.11+: `brew install python@3.11`, then `python3.11 -m venv` as in §4.
 - Docker Desktop, with **Settings > General > Use Rosetta for x86_64/amd64 emulation on Apple
   Silicon** on. The pinned Go image is `linux/amd64`, so on Apple Silicon every build runs
   emulated: slower, but it must give the same hash. Check both in the rehearsal: the Mac's
@@ -88,27 +86,60 @@ No WSL step; run everything in Terminal.
 - Differences in the commands: this laptop's address is `ipconfig getifaddr en0` (not
   `ip -4 addr`), `sha256sum` is `shasum -a 256`, and a USB stick is under `/Volumes/<name>`.
 
-## 4. Docker, the Go image and the Matrix checkout
+## 4. Docker, gVisor and the Matrix checkout
 
-Docker only runs the builds; `matrix` itself runs natively (the note at the top). Either Docker
-Desktop (on Windows with **Settings > Resources > WSL integration** enabled for your distro), or
-Docker Engine on Linux, with your user in the `docker` group. Then, in WSL2 or a terminal:
+Docker only runs the builds; `matrix` itself runs natively (the note at the top). Builds run with
+every sandbox flag (no network while compiling, no capabilities, non-root, read-only source,
+limits) and, wherever Docker has it, on **gVisor**: a user-space kernel, so a hostile build never
+reaches the kernel of the laptop that holds the keys. Builds under gVisor give the same hashes.
+
+| Laptop | Docker | Kernel isolation of builds |
+|---|---|---|
+| Linux (Debian) | Docker Engine | gVisor (§4.1) |
+| Windows | Docker Engine **inside WSL2** (§4.1). Docker Desktop cannot load gVisor: turn off its WSL integration for this distro, or quit it | gVisor (§4.1) |
+| macOS | Docker Desktop | its own Linux VM (gVisor is Linux-only); nothing to do |
+
+`matrix up` prints which one is active (`build isolation: ...`) and warns if builds would share
+this laptop's kernel.
+
+Docker Engine on Debian or WSL2 Ubuntu (WSL2 needs `systemd=true` under `[boot]` in
+`/etc/wsl.conf`, the default on new installs):
 
 ```bash
-docker run --rm hello-world                                    # works without sudo
-docker pull --platform linux/amd64 golang@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689   # H4; before the venue
-docker image ls --digests golang                               # the digest is listed
+sudo apt install -y docker.io && sudo usermod -aG docker $USER   # then log out and in again
+docker run --rm hello-world                                       # works without sudo
 ```
 
-Matrix, in the WSL2 home directory (not under `/mnt/c`: key file modes and speed):
+### 4.1 gVisor (Linux and WSL2)
+
+From [gvisor.dev](https://gvisor.dev/docs/user_guide/install/); the package registers the `runsc`
+runtime with Docker:
+
+```bash
+sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+sudo apt-get update && sudo apt-get install -y runsc
+sudo systemctl restart docker
+docker run --rm --runtime=runsc hello-world                       # works: gVisor is ready
+```
+
+### 4.2 The Matrix checkout
+
+Install [uv](https://docs.astral.sh/uv/) once (`curl -LsSf https://astral.sh/uv/install.sh | sh`,
+or `brew install uv` on macOS). Then, in the home directory (on Windows the WSL2 home, not under
+`/mnt/c`: key file modes and speed):
 
 ```bash
 git clone https://github.com/ChaoticNebula5/Matrix ~/Matrix && cd ~/Matrix
-git checkout <demo commit>                                     # the same on all four laptops
-python3.11 -m venv .venv && . .venv/bin/activate
-pip install -e .
-git rev-parse HEAD && sha256sum network.toml                   # compare on all four laptops
+uv sync                                     # Python 3.11 and every dependency, in .venv
+. .venv/bin/activate                        # or prefix every command with `uv run`
+matrix help
+git rev-parse HEAD && sha256sum network.toml   # compare on all four laptops
 ```
+
+The first `matrix up` checks Docker and pulls the pinned Go image if it is missing (about 800 MB:
+do it once before the venue, not on the hotspot).
 
 `network.toml` holds the network parameters every founder must agree on. It is checked into the
 repo, so the same checkout means the same values. For the demo it is (H3 and H4 filled in; pull the
