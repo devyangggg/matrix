@@ -120,8 +120,9 @@ Only exit code **0** means the file may be used.
 | `matrix verify` | Check a binary against its certificate, offline |
 | `matrix keygen` | Generate an extra Ed25519 key (for example for CI) |
 
-Add `-v` / `--verbose` to any command to log every step (UDP packets, HTTP calls, Docker commands)
-to stderr. `matrix tui -v` writes to `~/.matrix/verbose.log`.
+Add `-v` / `--verbose` to any command to log every step (UDP packets, HTTP calls, Docker commands,
+and this laptop's live build output) to stderr. With `-v`, `matrix up` keeps the logs on the console
+instead of opening the dashboard. `matrix tui -v` writes to `~/.matrix/verbose.log`.
 
 Exit codes: `0` certified / reproduced, `1` mismatch, `2` invalid certificate or not
 reproducible, `3` pending, `4` error, `5` build failed.

@@ -16,6 +16,7 @@ import signal
 import stat
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .genesis import Genesis
@@ -176,14 +177,25 @@ class _Log:
         self.used += len(data)
 
 
-async def _drain(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]:
-    """Drain to EOF, retaining only a bounded prefix and whether bytes were discarded."""
+async def _drain(
+    stream: asyncio.StreamReader, limit: int, emit: Callable[[str], None] | None = None
+) -> tuple[bytes, bool]:
+    """Drain to EOF, retaining only a bounded prefix and whether bytes were discarded.
+    `emit` gets each complete line of the retained prefix as it arrives (verbose mode)."""
     kept = bytearray()
     truncated = False
+    pending = b""
     while chunk := await stream.read(_CHUNK):
         room = max(0, limit - len(kept))
         kept += chunk[:room]
         truncated |= len(chunk) > room
+        if emit is not None:
+            pending += chunk[:room]
+            *lines, pending = pending.split(b"\n")
+            for line in lines:
+                emit(line.decode("utf-8", "replace").rstrip("\r"))
+    if emit is not None and pending:
+        emit(pending.decode("utf-8", "replace").rstrip("\r"))
     return bytes(kept), truncated
 
 
@@ -270,8 +282,17 @@ async def _run(
     assert proc.stdout is not None and proc.stderr is not None  # PIPE was requested
     finished = False
     try:
+        who = container or argv[0]  # a build container name, or git
+        live = _dbg.isEnabledFor(logging.DEBUG)  # only --verbose: nothing is echoed otherwise
         (out, _), (err, err_truncated) = await asyncio.gather(
-            _drain(proc.stdout, MAX_LOG), _drain(proc.stderr, MAX_LOG)
+            _drain(
+                proc.stdout, MAX_LOG, (lambda s: _dbg.debug("[%s] %s", who, s)) if live else None
+            ),
+            _drain(
+                proc.stderr,
+                MAX_LOG,
+                (lambda s: _dbg.debug("[%s err] %s", who, s)) if live else None,
+            ),
         )
         rc = await proc.wait()
         finished = True

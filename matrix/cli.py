@@ -1246,14 +1246,15 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
     log.info("up: starting the node: %s", vars(args))
     _out(f"{me.id}: builder starting on 0.0.0.0:7700 (Ctrl-C to stop)")
     # Just founded, on a real terminal: show the dashboard now. Later runs keep the plain
-    # foreground builder (`matrix tui` in a second terminal, as before).
-    show_tui = endorse is not None and sys.stdin.isatty() and sys.stdout.isatty()
+    # foreground builder (`matrix tui` in a second terminal, as before). With --verbose the
+    # console is the log: every step and the build output of this laptop scroll by, so the
+    # full-screen dashboard (which would hide them) stays off.
+    verbose = getattr(a, "verbose", False)
+    show_tui = endorse is not None and sys.stdin.isatty() and sys.stdout.isatty() and not verbose
+    if verbose and endorse is not None:
+        _out("verbose: logs stay on this console; run `matrix tui` in a second terminal.")
     try:
         if show_tui:
-            if getattr(a, "verbose", False):  # stderr would garble the full-screen UI
-                logfile = home / "verbose.log"
-                _out(f"verbose log: {logfile}")
-                node.configure_logging(True, str(logfile))
             await _node_and_tui(node, args, g, "127.0.0.1:7700", str(home))
         else:
             await node.run(args)

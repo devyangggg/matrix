@@ -189,3 +189,33 @@ async def test_isolation_reports_what_this_laptop_gets(monkeypatch, info, platfo
     monkeypatch.setattr(builder.sys, "platform", platform)
     got, how = await builder.isolation()
     assert got == runtime and text in how
+
+
+async def test_verbose_streams_each_output_line_live_and_keeps_the_log(tmp_path, caplog):
+    import logging
+    import sys
+
+    log = builder._Log(str(tmp_path / "x.log"), 0)
+    argv = [
+        sys.executable,
+        "-c",
+        "import sys; print('out1'); print('out2', end=''); sys.stderr.write('err1\\n')",
+    ]
+    with caplog.at_level(logging.DEBUG, logger="matrix.builder"):
+        rc, *_ = await builder._run(argv, log, container="mx-test")
+    lines = [r.getMessage() for r in caplog.records]
+    assert (
+        rc == 0 and "[mx-test] out1" in lines and "[mx-test] out2" in lines
+    )  # unterminated tail too
+    assert "[mx-test err] err1" in lines
+    assert "out1" in (tmp_path / "x.log").read_text()  # the build log file is unchanged
+
+
+async def test_output_is_not_echoed_without_verbose(tmp_path, caplog):
+    import logging
+    import sys
+
+    log = builder._Log(str(tmp_path / "x.log"), 0)
+    with caplog.at_level(logging.WARNING, logger="matrix.builder"):
+        await builder._run([sys.executable, "-c", "print('quiet')"], log)
+    assert not [r for r in caplog.records if "quiet" in r.getMessage()]

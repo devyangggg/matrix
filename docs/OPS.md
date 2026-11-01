@@ -248,9 +248,9 @@ What happens:
    `~/.matrix/endorsements.json`, then starts the node in the same process: listen
    `0.0.0.0:7700`, data `~/.matrix/data`, discovery on UDP 7788. On a terminal, a fresh founding
    then opens the dashboard (`matrix tui`) in the same window once the builder answers; `q`
-   closes it and the builder keeps running (Ctrl-C stops it). With `-v` the log goes to
-   `~/.matrix/verbose.log` while the dashboard is open. Later runs of `matrix up` do not open it:
-   run `matrix tui` in a second terminal.
+   closes it and the builder keeps running (Ctrl-C stops it). With `-v` it does not open the
+   dashboard: the logs, including the live output of this laptop's builds, stay on the console
+   (run `matrix tui` in a second terminal). Later runs of `matrix up` do not open it either.
 
 On a mismatch, **never type `y`**:
 
@@ -357,4 +357,4 @@ the API off the LAN.
 | `matrix: no builder accepted the request` | The local node is not running, or no peer is reachable on TCP 7700. |
 | Build `ERROR` on one laptop | Docker not reachable from WSL (`docker ps`), image not pre-pulled, disk full, or no internet for `git clone` / the Go module proxy. Environmental errors abstain, they never vote. |
 | `evidence --since` window looks wrong | Each builder filters on its own clock; fix large clock skew between laptops. |
-| Anything unclear | Add `-v`/`--verbose` to any command (`matrix up -v`, `matrix release -v ...`): every step, UDP packet sent/received, HTTP call and Docker command is logged to stderr (`matrix tui -v` writes `~/.matrix/verbose.log`). In `matrix up -v`, each 2 s round prints `sent N, received own echo A / from others B`: `B` stays 0 when no other laptop's packets arrive (§5 broadcast check). |
+| Anything unclear | Add `-v`/`--verbose` to any command (`matrix up -v`, `matrix release -v ...`): every step, UDP packet sent/received, HTTP call, Docker command and the live output of this laptop's builds is logged to stderr (`matrix tui -v` writes `~/.matrix/verbose.log`). In `matrix up -v`, each 2 s round prints `sent N, received own echo A / from others B`: `B` stays 0 when no other laptop's packets arrive (§5 broadcast check). |
