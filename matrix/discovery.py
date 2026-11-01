@@ -156,10 +156,14 @@ def local_ip() -> str | None:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 s.connect(target)
                 ip = s.getsockname()[0]
-        except OSError:
+        except OSError as e:
+            log.debug("local_ip: route to %s failed: %s", target[0], e)
             continue
+        if ip == "0.0.0.0" or ip.startswith("127."):
+            log.debug("local_ip: route to %s leaves from %s, not a LAN address", target[0], ip)
         if ip != "0.0.0.0" and not ip.startswith("127."):
             return ip
+    log.debug("local_ip: no LAN address found")
     return None
 
 
@@ -177,6 +181,7 @@ class AddressBook:
             log.debug("hello.reject reason=%s", reason)
             return None
         self.update(h)
+        log.debug("hello.accept id=%s addr=%s seq=%d", h.signer, h.addr, h.seq)
         return h
 
     def update(self, h: Hello) -> bool:
@@ -213,8 +218,10 @@ def udp_socket(port: int | None) -> socket.socket:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             s.bind(("0.0.0.0", port))
         s.setblocking(False)
+        log.debug("udp socket %s", f"bound to 0.0.0.0:{port}" if port is not None else "send-only")
         return s
-    except OSError:
+    except OSError as e:
+        log.debug("udp socket failed (port %s): %s", port, e)
         s.close()
         raise
 
@@ -224,6 +231,7 @@ class Datagrams(asyncio.DatagramProtocol):
         self.on_datagram = on_datagram
 
     def datagram_received(self, data: bytes, addr) -> None:
+        log.debug("udp rx %d bytes from %s:%d", len(data), addr[0], addr[1])
         try:
             self.on_datagram(data, addr)
         except Exception:  # a callback never takes the listener down
@@ -270,6 +278,7 @@ class Discovery:
         try:
             if self.transport is not None:
                 self.transport.sendto(data, dest)
+                log.debug("udp tx %d bytes to %s:%d", len(data), *dest)
         except OSError as e:  # Wi-Fi off, no route: retried next round
             log.debug("%s hello.send_failed %s", self.me.id, e)
 
@@ -277,15 +286,30 @@ class Discovery:
         seq = max(int(self.clock() * 1000), self.last_sent + 1)  # receivers drop repeated seqs
         self.last_sent = seq
         self.last = make_hello(self.g, self.me, self.sk, self.addr, seq)
+        log.debug("%s hello.send addr=%s seq=%d", self.me.id, self.addr, seq)
         self._send(self.last, (BROADCAST, self.port))
         self.book.update(Hello(self.me.id, self.addr, seq, loads_strict(self.last)))
+        now = self.clock()
+        state = {
+            n.id: "online"
+            if self.book.online(n.id, now)
+            else "offline"
+            if self.book.addr(n.id)
+            else "never-heard"
+            for n in self.g.nodes
+            if n.id != self.me.id
+        }
+        log.debug("%s members: %s", self.me.id, " ".join(f"{k}={v}" for k, v in state.items()))
 
     def on_datagram(self, data: bytes, src) -> None:
         h, reason = _check_hello(data, self.g, self.book.seqs)
         if h is None:
+            why = "replay (our own echo, or an old hello)" if reason == "replay" else reason
+            log.debug("%s datagram from %s dropped: %s", self.me.id, src[0], why)
             if reason not in ("replay", "parse"):  # own echo and ceremony traffic are routine
                 log.info("%s hello.reject reason=%s from=%s", self.me.id, reason, src[0])
             return
+        log.debug("%s hello.accept id=%s addr=%s seq=%d", self.me.id, h.signer, h.addr, h.seq)
         if self.book.update(h):
             log.info("%s peer.addr id=%s addr=%s", self.me.id, h.signer, h.addr)
             if self.last is not None and h.signer != self.me.id:
@@ -303,6 +327,13 @@ class Discovery:
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         sock = udp_socket(self.port)  # a bind failure propagates: the node refuses to start
+        log.info(
+            "%s discovery: UDP %d, hello every %ds, online window %ds",
+            self.me.id,
+            self.port,
+            HELLO_INTERVAL_S,
+            ONLINE_WINDOW_S,
+        )
         self.transport, _ = await loop.create_datagram_endpoint(
             lambda: Datagrams(self.on_datagram), sock=sock
         )
@@ -310,7 +341,11 @@ class Discovery:
             next_at = 0.0
             while True:
                 addr = self._advertised()
-                if addr is not None and (addr != self.addr or self.clock() >= next_at):
+                if addr is None:
+                    log.debug("%s no LAN address: not announcing (is Wi-Fi up?)", self.me.id)
+                elif addr != self.addr or self.clock() >= next_at:
+                    if addr != self.addr:
+                        log.info("%s advertised address %s -> %s", self.me.id, self.addr, addr)
                     self.addr = addr
                     self.announce()
                     next_at = self.clock() + HELLO_INTERVAL_S

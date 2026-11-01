@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import random
@@ -34,6 +35,7 @@ from .discovery import (
     check_endorsements,
     default_name,
     load_network,
+    local_ip,
     make_endorse,
     make_founder,
     params_hash,
@@ -50,6 +52,8 @@ from .model import make_envelope, parse_certificate, parse_envelope, request_id,
 from .net import PeerClient
 from .select import selected
 from .verdict import Verdict, verdict
+
+log = logging.getLogger(__name__)
 
 RELEASE_POLL_S = 2
 
@@ -121,6 +125,9 @@ def cmd_verify(a: argparse.Namespace) -> int:
     except (OSError, GenesisError) as e:
         _err(str(e))
         return EXIT_ERROR
+    log.info(
+        "verify: read %s (%d bytes), certificate %s, genesis %s", a.file, len(data), a.cert, g.hash
+    )
     pin = _read_pin(a.genesis_sha256)
     if pin is None:
         _err("no valid pinned genesis hash (--genesis-sha256 or ~/.matrix/genesis.sha256)")
@@ -128,8 +135,10 @@ def cmd_verify(a: argparse.Namespace) -> int:
     if g.hash != pin:
         _err("genesis file does not match the pinned hash")
         return EXIT_ERROR
+    log.info("verify: genesis matches the pin %s", pin)
 
     def invalid(why: str) -> int:
+        log.info("verify: failed: %s", why)
         _out(f"INVALID_CERT: {why}")
         return EXIT_INVALID
 
@@ -138,6 +147,7 @@ def cmd_verify(a: argparse.Namespace) -> int:
         return invalid("malformed certificate")
     if c.genesis_hash != pin:
         return invalid("certificate is for a different genesis")
+    log.info("verify: certificate parsed, %d attestations, same genesis", len(c.attestations))
     req = parse_envelope(c.request, g)
     if req is None or req.type != "release":
         return invalid("request is not signed by a genesis release signer")
@@ -145,10 +155,12 @@ def cmd_verify(a: argparse.Namespace) -> int:
         return invalid(f"certificate is for {req.body['repo_url']}@{req.body['tag']}")
     if a.commit is not None and req.body["commit"] != a.commit:
         return invalid(f"certificate is for commit {req.body['commit']}")
+    log.info("verify: request signature and expected repo/tag/commit checked")
     # Invariant 4: the request comes from the caller-checked certificate, not from attestations.
     v = verdict(c.request, c.attestations, g)
     if v.state != "AGREED":
         return invalid(f"attestations give {v.state}, not AGREED")
+    log.info("verify: verdict AGREED on %s with %d results", v.hash, len(v.results))
     if hashlib.sha256(data).hexdigest() != v.hash:
         _out(f"MISMATCH: file sha256 differs from the certified {v.hash}")
         return EXIT_MISMATCH
@@ -162,13 +174,21 @@ def cmd_verify(a: argparse.Namespace) -> int:
 async def _submit(peers: PeerClient, node: Node, env: dict) -> bool:
     url = peers._url(node.id, "/v1/requests")  # address book first, then genesis addr
     if url is None:
+        log.info("submit: %s has no verified address, skipped", node.id)
         return False  # no verified address for this builder: try the next operator
     headers = {"Content-Type": "application/json"}
     try:
         async with peers.session.post(url, data=canonical_json(env), headers=headers) as r:
             await r.read()
+            log.info(
+                "submit: POST %s -> %d (%s)",
+                url,
+                r.status,
+                "accepted" if r.status == 202 else "refused",
+            )
             return r.status == 202
-    except (ClientError, OSError, TimeoutError):
+    except (ClientError, OSError, TimeoutError) as e:
+        log.info("submit: POST %s failed: %s: %s", url, type(e).__name__, e)
         return False
 
 
@@ -202,21 +222,31 @@ async def refresh(peers: PeerClient, book: ClientBook) -> None:
     do is hide addresses (liveness), never forge them."""
     g = book.g
     h = await peers.get_json_at(f"http://{book.local}/v1/health")
+    log.info("refresh: local builder %s health: %s", book.local, h)
     nid = h.get("node_id") if isinstance(h, dict) else None
     ok = isinstance(nid, str) and g.node(nid) is not None and h.get("genesis_hash") == g.hash
     book.local_id = nid if ok else None
+    log.info(
+        "refresh: local builder is %s (%s)",
+        nid if ok else None,
+        "genesis matches" if ok else "unreachable or other genesis",
+    )
     if all(n.addr for n in g.nodes):
+        log.debug("refresh: genesis has static addresses, /v1/peers not needed")
         return  # dev genesis: static addresses
     d = await peers.get_json_at(f"http://{book.local}/v1/peers")
     if not isinstance(d, dict):
+        log.info("refresh: /v1/peers from %s gave nothing", book.local)
         return
     now = d.get("now")
     if type(now) in (int, float) and math.isfinite(now):
         book.peers_now = float(now)
     hellos = d.get("hellos")
     if isinstance(hellos, list):
+        log.debug("refresh: %d hellos from the local builder, re-verifying each", len(hellos))
         for raw in hellos[: 4 * len(g.nodes)]:
             book.accept(raw)
+        log.info("refresh: verified addresses: %s", {n.id: book.addr(n.id) for n in g.nodes})
 
 
 async def open_client(g: Genesis, local: str) -> tuple[PeerClient, ClientBook]:
@@ -248,6 +278,13 @@ async def _submit_quorum(
     for n in _submit_targets(g, online):
         if accepted > g.f:
             break
+        log.info(
+            "submit: trying %s (operator %s), %d of %d accepted so far",
+            n.id,
+            n.operator,
+            accepted,
+            g.f + 1,
+        )
         accepted += await _submit(peers, n, env)
     return accepted
 
@@ -262,6 +299,7 @@ async def collect(peers: PeerClient, g: Genesis, rid: str) -> tuple[dict[str, di
         if not isinstance(b, dict) or not isinstance(b.get("envelopes"), list):
             continue
         answered.add(n.id)
+        log.debug("collect: %s answered with %d envelopes", n.id, len(b["envelopes"]))
         for raw in b["envelopes"]:
             e = parse_envelope(raw, g)
             if e is not None and e.type == "attest" and e.body["request_id"] == rid:
@@ -284,7 +322,13 @@ async def _download(peers: PeerClient, v: Verdict) -> bytes | None:
     random.shuffle(signers)  # do not always load the same builder
     for s in signers:
         data = await peers.get_bytes(s, f"/v1/artifacts/{v.hash}", MAX_ARTIFACT)
-        if data is not None and hashlib.sha256(data).hexdigest() == v.hash:
+        ok = data is not None and hashlib.sha256(data).hexdigest() == v.hash
+        log.info(
+            "download: artifact from %s: %s",
+            s,
+            "ok, hash matches" if ok else "missing or hash mismatch",
+        )
+        if ok:
             return data
     return None
 
@@ -339,11 +383,21 @@ def check_proof(item: dict, g: Genesis) -> bool:
 
 
 def _load(a: argparse.Namespace) -> Genesis | None:
+    path = _genesis_path(a.genesis)
     try:
-        return load_genesis(_genesis_path(a.genesis))
+        g = load_genesis(path)
     except GenesisError as e:
         _err(str(e))
         return None
+    log.info(
+        "genesis %s: %d nodes, f=%d, threshold=%d, hash %s",
+        path,
+        len(g.nodes),
+        g.f,
+        g.threshold,
+        g.hash,
+    )
+    return g
 
 
 # release
@@ -355,6 +409,7 @@ def _local(a: argparse.Namespace) -> str | None:
     if not _HOSTPORT.fullmatch(local):
         _err(f"--node must be HOST:PORT, got {local!r}")
         return None
+    log.info("local builder: %s", local)
     return local
 
 
@@ -369,6 +424,7 @@ def cmd_release(a: argparse.Namespace) -> int:
     except (OSError, ValueError) as e:
         _err(f"cannot load key: {e}")
         return EXIT_ERROR
+    log.info("release: key %s loaded", key)
     return asyncio.run(_release(a, g, sk, local))
 
 
@@ -386,13 +442,20 @@ async def _release(a: argparse.Namespace, g: Genesis, sk: Any, local: str) -> in
     if not _NAME.fullmatch(name) or name in (".", ".."):
         _err(f"invalid output name {name!r}")
         return EXIT_ERROR
-
+    log.info("release: signing as %s; request body %s", signer.id, body)
     env = make_envelope("release", signer.id, body, sk, g)
     rid = request_id(body)
     _out(f"request {rid} {a.repo}@{a.tag}")
     peers, book = await open_client(g, local)
     try:
         accepted = await _submit_quorum(peers, g, env, _online(g, book))
+        log.info(
+            "release: %d operators accepted (need %d); polling every %ds for up to %ds",
+            accepted,
+            g.f + 1,
+            RELEASE_POLL_S,
+            a.wait,
+        )
         if accepted <= g.f:
             _err(f"only {accepted} operators accepted the request; need {g.f + 1}")
             if not all(n.addr for n in g.nodes) and not book.seqs:
@@ -406,6 +469,12 @@ async def _release(a: argparse.Namespace, g: Genesis, sk: Any, local: str) -> in
             union, answered = await collect(peers, g, rid)
             ever |= answered
             v = verdict(env, union.values(), g)  # our own signed request, never a peer's
+            log.info(
+                "release: poll: %d builders answered, %d attestations, verdict %s",
+                len(answered),
+                len(union),
+                v.state,
+            )
             if v.state == "AGREED" and (got is None or got[0] != v.hash):
                 data = await _download(peers, v)
                 got = (v.hash, data) if data is not None else None
@@ -568,8 +637,9 @@ class UdpBus:
     def send(self, data: bytes) -> None:
         try:
             self.transport.sendto(data, (BROADCAST, self.port))
-        except OSError:
-            pass  # no network right now: the next round retries
+            log.debug("udp tx %d bytes to %s:%d", len(data), BROADCAST, self.port)
+        except OSError as e:
+            log.debug("udp tx failed: %s (no network? retried next round)", e)  # next round retries
 
     def close(self) -> None:
         if self.transport is not None:
@@ -621,6 +691,16 @@ async def ceremony(
     endorses: dict[str, Endorse] = {}
     mine = params_hash(params)
     sealed: dict[str, str] = {}  # after the seal: genesis id -> pubkey, the only keys that count
+    rx = {"own": 0, "others": 0, "ignored": 0}  # datagram counts, for the debug summary
+    log.info(
+        "ceremony: network %r, name %s, node key %s, params hash %s, announce every %ss, timeout %ss",
+        nid,
+        name,
+        me_pub[:8],
+        mine[:8],
+        interval,
+        timeout,
+    )
 
     def show(f: Founder) -> None:
         flag = "" if f.params_hash == mine else "  params MISMATCH (different network.toml)"
@@ -631,6 +711,15 @@ async def ceremony(
         if f is not None:
             prev = founders.get(f.pubkey)
             founders[f.pubkey] = f  # latest wins
+            own_echo = f.pubkey == me_pub
+            rx["own" if own_echo else "others"] += 1
+            log.debug(
+                "ceremony: founder %s (%s) from %s%s",
+                f.id,
+                f.pubkey[:8],
+                src[0],
+                " [own echo]" if own_echo else "",
+            )
             if prev is None or (prev.id, prev.params_hash) != (f.id, f.params_hash):
                 show(f)
             return
@@ -639,14 +728,44 @@ async def ceremony(
         e = parse_endorse(data, sealed or {x.id: x.pubkey for x in founders.values()})
         if e is not None:
             endorses[e.signer] = e
+            rx["others" if e.signer != me_pub else "own"] += 1
+            log.debug(
+                "ceremony: endorse by %s for %s from %s", e.signer[:8], e.genesis_hash[:8], src[0]
+            )
+        else:
+            rx["ignored"] += 1
+            log.debug(
+                "ceremony: ignored %d bytes from %s (not a founder or endorse of this network)",
+                len(data),
+                src[0],
+            )
 
     await bus.open(on_datagram)
     sending = [own]
 
     async def announce() -> None:
+        rounds = 0
         while True:
             for msg in sending:
                 bus.send(msg)
+            rounds += 1
+            log.debug(
+                "ceremony: round %d: sent %d, received own echo %d / from others %d / ignored %d; %d founders known",
+                rounds,
+                len(sending),
+                rx["own"],
+                rx["others"],
+                rx["ignored"],
+                len(founders),
+            )
+            if rounds == 5 and not rx["others"]:
+                log.warning(
+                    "ceremony: %ds without a datagram from any other laptop%s: check UDP %d "
+                    "(firewall, same Wi-Fi, client isolation; docs/OPS.md §5)",
+                    int(rounds * interval),
+                    "" if rx["own"] else " and not even our own echo",
+                    DISCOVERY_PORT,
+                )
             await asyncio.sleep(interval)
 
     announcer = asyncio.create_task(announce())
@@ -656,23 +775,28 @@ async def ceremony(
         _out("Press Enter to seal when every laptop is listed.")
         while True:
             line = await ask("seal")
+            log.debug("ceremony: Enter pressed (%d founders listed)", len(founders))
             if not line:
                 _err("stdin closed: the ceremony needs a terminal")
                 return None
             problem = seal_problem(params, list(founders.values()), me_pub)
             if problem is None:
                 break
+            log.info("ceremony: seal refused: %s", problem)
             _out(f"cannot seal yet: {problem}")
         fs = list(founders.values())  # frozen: later founders do not change our genesis
         raw = ceremony_genesis(params, fs)
         g = parse_genesis(raw)
+        log.info("ceremony: sealed %d founders, genesis hash %s", len(fs), g.hash)
         _out(f"Sealed {len(fs)} founders:")
         for n in g.nodes:
             _out(f"  {n.id:<24} {n.pubkey[:8]}")
         _out(f"Short code: {short_code(g.hash)}")
         drain()  # an extra Enter pressed while sealing must not answer the y/N question
         _out("Read it aloud. Do all screens show this code and this list? [y/N]")
-        if (await ask("confirm")).strip().lower() != "y":
+        answer = (await ask("confirm")).strip().lower()
+        log.info("ceremony: short code answer %r", answer)
+        if answer != "y":
             _err("aborted: nothing written")
             return None
 
@@ -683,6 +807,9 @@ async def ceremony(
         endorses[me.id] = parse_endorse(endorse, {me.id: me_pub})
         sending.append(endorse)
         bus.send(endorse)
+        log.info(
+            "ceremony: endorsed genesis %s, waiting for %d endorsements", g.hash[:16], len(g.nodes)
+        )
         ids = {n.id for n in g.nodes}
         deadline = loop.time() + timeout
         seen = 0
@@ -698,11 +825,13 @@ async def ceremony(
                 break
             if len(ok) != seen:
                 seen = len(ok)
+                log.info("ceremony: endorsements from %s", sorted(e["signer"] for e in ok))
                 _out(f"waiting for every laptop to confirm: {seen}/{len(ids)}")
             if loop.time() > deadline:
                 _err("not every laptop confirmed in time: nothing written")
                 return None
             await asyncio.sleep(0.2)
+        log.info("ceremony: all %d endorsements verified", len(ids))
         _out(f"Network founded: {len(ids)} builders, genesis {g.hash}")
         return raw, sorted(ok, key=lambda e: e["signer"]), endorse
     finally:
@@ -723,6 +852,9 @@ def _ensure_key(path: Path) -> Any:
     if not path.exists():
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _write_key(path, keygen()[0])
+        log.info("keys: generated %s (mode 0600, never leaves this laptop)", path)
+    else:
+        log.info("keys: using existing %s", path)
     return load_key(str(path))
 
 
@@ -730,6 +862,7 @@ def _write_atomic(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
+    log.info("wrote %s (%d bytes)", path, len(data))
 
 
 def _archive(home: Path) -> Path:
@@ -745,6 +878,7 @@ def _archive(home: Path) -> Path:
     for name in ("genesis.json", "genesis.sha256", "endorsements.json", "data"):
         if (home / name).exists():
             os.replace(home / name, dest / name)
+            log.info("refound: moved %s to %s", home / name, dest / name)
     return dest
 
 
@@ -760,6 +894,7 @@ def _check_founded(home: Path) -> Genesis | None:
     if pin != g.hash or not isinstance(ends, list) or not check_endorsements(g, ends):
         _err(f"{home}: genesis does not match its pin or endorsements; refusing to start")
         return None
+    log.info("founded network found in %s: genesis %s, pin and endorsements verified", home, g.hash)
     return g
 
 
@@ -772,16 +907,22 @@ async def _keep_endorsing(data: bytes, seconds: float) -> None:
         while loop.time() < end:
             try:
                 sock.sendto(data, (BROADCAST, DISCOVERY_PORT))
-            except OSError:
-                pass
+                log.debug(
+                    "late endorse: udp tx %d bytes to %s:%d", len(data), BROADCAST, DISCOVERY_PORT
+                )
+            except OSError as e:
+                log.debug("late endorse: udp tx failed: %s", e)
             await asyncio.sleep(FOUNDER_INTERVAL_S)
 
 
 async def _quiet_ok(*argv: str) -> bool:
+    log.debug("exec: %s", " ".join(argv))
     p = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
     )
-    return await p.wait() == 0
+    rc = await p.wait()
+    log.debug("exec: rc=%d", rc)
+    return rc == 0
 
 
 async def _docker_ready(images: Any) -> bool:
@@ -796,7 +937,9 @@ async def _docker_ready(images: Any) -> bool:
         _err("docker not found: install Docker first (docs/OPS.md §4)")
         return False
     for image in sorted(set(images)):
-        if await _quiet_ok("docker", "image", "inspect", image):
+        present = await _quiet_ok("docker", "image", "inspect", image)
+        log.info("docker: image %s %s", image, "present" if present else "missing")
+        if present:
             continue
         _out(f"pulling the pinned Go toolchain {image} (once per laptop)...")
         p = await asyncio.create_subprocess_exec(
@@ -805,12 +948,20 @@ async def _docker_ready(images: Any) -> bool:
         if await p.wait() != 0:
             _err(f"docker pull {image} failed: check the internet connection, then retry")
             return False
+    log.info("docker: reachable, %d pinned image(s) present", len(set(images)))
     _out(f"build isolation: {(await isolation())[1]}")
     return True
 
 
 def cmd_up(a: argparse.Namespace) -> int:
     home = Path(a.home).expanduser() if a.home else Path.home() / ".matrix"
+    log.info(
+        "up: home %s, name %s, refound %s, advertise %s",
+        home,
+        a.name or "(hostname)",
+        a.refound,
+        a.advertise,
+    )
     try:
         node._fault(a)  # fault flags are validated before anything else (inert without opt-in)
     except ValueError as e:
@@ -829,11 +980,14 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
     keys = home / "keys"
     endorse: bytes | None = None
     if (home / "genesis.json").exists() and not a.refound:
+        log.info("up: %s exists, skipping the founding ceremony", home / "genesis.json")
         if _check_founded(home) is None:
             return EXIT_ERROR
     else:
+        log.info("up: no founded network (or --refound): running the founding ceremony")
         try:
             params = load_network("network.toml")
+            log.info("network.toml loaded: %s", params)
         except NetworkError as e:
             _err(f"{e} (run `matrix up` from the repo checkout)")
             return EXIT_ERROR
@@ -842,14 +996,23 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
             _err(f"hostname gives an invalid name {name!r}: pass --name")
             return EXIT_ERROR
         # before the ceremony, so no founder waits for this laptop's download mid-founding
+        log.info("up: checking Docker and the pinned images")
         if not await _docker_ready(params["allowed_images"].values()):
             return EXIT_ERROR
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        log.info("up: loading or creating keys in %s", keys)
         try:
             sk, release_sk = _ensure_key(keys / "node.key"), _ensure_key(keys / "release.key")
         except (OSError, ValueError) as e:
             _err(f"cannot create or load keys in {keys}: {e}")
             return EXIT_ERROR
+        ip = local_ip()
+        log.info(
+            "up: LAN address %s; founders are broadcast to %s:%d (UDP)",
+            ip,
+            BROADCAST,
+            DISCOVERY_PORT,
+        )
         try:
             lines = _stdin_lines()
 
@@ -878,6 +1041,7 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
         _out(f"pin for consumers: {g.hash} (also in {home / 'genesis.sha256'})")
 
     g = load_genesis(str(home / "genesis.json"))
+    log.info("up: genesis %s loaded, %d nodes", g.hash, len(g.nodes))
     try:
         pub = pubkey_hex(load_key(str(keys / "node.key")))
     except (OSError, ValueError) as e:
@@ -887,6 +1051,7 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
     if me is None:
         _err("this laptop's node key is not in the founded genesis")
         return EXIT_ERROR
+    log.info("up: this laptop is %s in genesis", me.id)
     if not await _docker_ready(g.allowed_images.values()):
         return EXIT_ERROR
     args = argparse.Namespace(
@@ -903,6 +1068,7 @@ async def _up(a: argparse.Namespace, home: Path, node: Any) -> int:
         hash=a.hash,
     )
     extra = asyncio.create_task(_keep_endorsing(endorse, CEREMONY_TIMEOUT_S)) if endorse else None
+    log.info("up: starting the node: %s", vars(args))
     _out(f"{me.id}: builder starting on 0.0.0.0:7700 (Ctrl-C to stop)")
     try:
         await node.run(args)
@@ -979,6 +1145,13 @@ def _command(
 def _options(s: argparse.ArgumentParser) -> Any:
     o = s.add_argument_group("options")
     o.add_argument("-h", "--help", action="help", help="show this help and exit")
+    o.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,  # keeps a -v given before the command
+        help="log every step to stderr (to ~/.matrix/verbose.log for tui)",
+    )
     return o
 
 
@@ -995,13 +1168,16 @@ def _overview(sub: Any) -> str:
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="matrix",
-        usage="matrix [--genesis FILE] [--node HOST:PORT] COMMAND [options]",
+        usage="matrix [-v] [--genesis FILE] [--node HOST:PORT] COMMAND [options]",
         description="Matrix: a Byzantine-tolerant release gate for Go binaries.\n"
         "Independent builders each build a tagged commit; a release is certified when f+1\n"
         "of them signed the same hash, and anyone can check the certificate offline.",
         formatter_class=_RAW,
     )
     _globals(p, top=True)
+    p.add_argument(
+        "-v", "--verbose", action="store_true", help="log every step to stderr, for debugging"
+    )
     sub = p.add_subparsers(dest="cmd", metavar="COMMAND", help=argparse.SUPPRESS)
 
     s = _command(
@@ -1196,6 +1372,14 @@ def run(argv: list[str] | None = None) -> int:
     if a.cmd is None:  # bare `matrix`: show what there is, but it is not a successful command
         sys.stderr.write(p.format_help())
         return EXIT_ERROR
+    verbose = getattr(a, "verbose", False)
+    logfile = None
+    if verbose and a.cmd == "tui":  # stderr would garble the full-screen UI
+        logfile = Path.home() / ".matrix" / "verbose.log"
+        logfile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _err(f"verbose log: {logfile}")
+    node.configure_logging(verbose, str(logfile) if logfile else None)
+    log.info("matrix %s: %s", a.cmd, {k: v for k, v in vars(a).items() if k != "fn"})
     try:
         return a.fn(a)
     except Exception as e:  # noqa: BLE001  fail closed: an unexpected error is never success

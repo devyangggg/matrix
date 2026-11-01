@@ -567,6 +567,14 @@ def test_global_options_before_or_after_the_command():
     assert (mixed.genesis, mixed.node) == (None, "h:1")
 
 
+def test_verbose_before_or_after_any_command():
+    p = cli._parser()
+    for argv in (["keygen", "--out", "k"], ["up"], ["help"], ["status", "x"]):
+        assert not getattr(p.parse_args(argv), "verbose", False)
+        assert p.parse_args(["-v", *argv]).verbose
+        assert p.parse_args([*argv, "--verbose"]).verbose
+
+
 def test_every_command_keeps_its_option_names():
     """The commands read these attributes; the help rework must not rename any of them."""
     p = cli._parser()

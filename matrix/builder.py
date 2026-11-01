@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,8 @@ from dataclasses import dataclass
 
 from .genesis import Genesis
 from .model import Request, parse_recipe
+
+_dbg = logging.getLogger(__name__)  # `log` is the per-build log file in this module
 
 MAX_ARTIFACT = 64 * 1024 * 1024
 MAX_SOURCE = (
@@ -186,6 +189,7 @@ async def _drain(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]
 
 async def _quiet(*argv: str) -> bytes:
     """Best-effort helper command: never raises, never hangs."""
+    _dbg.debug("exec: %s", " ".join(argv))
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -250,6 +254,7 @@ async def _run(
     argv: list[str], log: _Log, *, container: str | None = None, env: dict | None = None
 ) -> tuple[int, str, str, bool]:
     """Run one step; return (rc, stdout, stderr, stderr_truncated). Kill on cancellation."""
+    _dbg.debug("run: %s", " ".join(argv))
     log.write(b"$ " + " ".join(argv).encode("utf-8", "replace") + b"\n")
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -274,6 +279,7 @@ async def _run(
         if not finished:
             await _kill(proc, container)
     log.write(out + err)
+    _dbg.debug("run: rc=%d, %d bytes stdout, %d bytes stderr", rc, len(out), len(err))
     return rc, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), err_truncated
 
 
@@ -391,6 +397,9 @@ async def build(
     logs = os.path.join(env.data_dir, "logs")
     artifacts = os.path.join(env.data_dir, "artifacts")
     try:
+        _dbg.debug(
+            "build %s attempt %d: step 0, clean work dir and stale containers", rid[:12], attempt
+        )
         # 0. preconditions and a clean slate
         os.makedirs(logs, exist_ok=True)
         os.makedirs(artifacts, exist_ok=True)
@@ -403,11 +412,13 @@ async def build(
         names = [container_name(env, rid, attempt, s) for s in ("deps", "build", "build-r")]
         await _quiet("docker", "rm", "-f", *names)
 
+        _dbg.debug("build %s: step 1, fetch source and read recipe", rid[:12])
         # 1. source and recipe
         await _fetch_source(req, work, log, patch)
         recipe = _read_recipe(f"{work}/src", g)
         image = g.allowed_images[recipe.image]
 
+        _dbg.debug("build %s: step 2, go mod download", rid[:12])
         # 2. dependencies: any failure here is environmental
         common = docker_common(env, rid, attempt, "deps")
         argv = deps_argv(common, work, image)
@@ -415,6 +426,7 @@ async def build(
         if rc != 0:
             raise _Stop("ERROR", f"go mod download failed (rc={rc}): {err.strip()[:200]}")
 
+        _dbg.debug("build %s: step 3, go build (network off)", rid[:12])
         # 3. build, with a single confirming rerun for a compile error
         argv = build_argv(docker_common(env, rid, attempt, "build"), work, image, recipe)
         rc, _, err, truncated = await _run(argv, log, container=names[1])
@@ -434,6 +446,7 @@ async def build(
                 return Outcome("FAILED", "FAILED", None, "deterministic compile error")
             raise _Stop("ERROR", f"go build failed (rc={rc}): {err.strip()[:200]}")
 
+        _dbg.debug("build %s: step 4, hash and store the artifact", rid[:12])
         # 4. hash and keep
         # Shield the thread and join it on cancellation before removing work/<rid>.
         # asyncio.to_thread itself would continue copying after the awaiting task is cancelled.
@@ -454,8 +467,12 @@ async def build(
             raise
         except OSError as e:
             raise _Stop("ERROR", f"cannot read build output: {e.strerror}") from e
+        _dbg.debug("build %s: hash %s", rid[:12], digest)
         return Outcome("HASH", digest, path, "ok")
     except _Stop as stop:
+        _dbg.debug(
+            "build %s: stopped with %s: %s", rid[:12], stop.outcome.kind, stop.outcome.reason
+        )
         return stop.outcome
     except OSError as e:  # work dir, log or artifact I/O
         return Outcome("ERROR", None, None, f"I/O error: {e}")

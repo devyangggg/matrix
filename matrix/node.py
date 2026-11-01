@@ -15,7 +15,22 @@ from aiohttp import web
 from matrix.faults import Fault
 from matrix.net import PeerClient, make_app
 
+log = logging.getLogger(__name__)
 _MODES = ("inject", "lie", "collude", "stall", "crash", "equivocate", "bad-artifact")
+
+
+def configure_logging(verbose: bool, file: str | None = None) -> None:
+    """--verbose: every step at DEBUG on stderr (or in `file`, for the full-screen TUI)."""
+    if not verbose:
+        return
+    handler = logging.FileHandler(file) if file else logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s: %(message)s", "%H:%M:%S"
+        )
+    )
+    logging.basicConfig(level=logging.DEBUG, handlers=[handler], force=True)
+    logging.getLogger("asyncio").setLevel(logging.INFO)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -33,6 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fault", choices=_MODES)
     parser.add_argument("--patch")
     parser.add_argument("--hash")
+    parser.add_argument("--verbose", "-v", action="store_true", help="log every step to stderr")
     return parser
 
 
@@ -77,20 +93,39 @@ async def run(args: argparse.Namespace) -> None:
     from matrix.protocol import Engine
     from matrix.store import Store
 
+    log.info(
+        "node: listen=%s:%d advertise=%s discovery=%s fault=%s",
+        host,
+        port,
+        advertise or "auto",
+        discovery,
+        fault.mode,
+    )
     g = load_genesis(args.genesis)
+    log.info(
+        "node: genesis %s loaded: %d nodes, f=%d, threshold=%d, hash %s",
+        args.genesis,
+        len(g.nodes),
+        g.f,
+        g.threshold,
+        g.hash,
+    )
     me = g.node(args.id)
     if me is None:
         raise ValueError("node id is not in genesis")
     sk = load_key(args.key)
     if pubkey_hex(sk) != me.pubkey:
         raise ValueError("node key does not match genesis")
+    log.info("node: identity %s, key %s matches genesis", me.id, args.key)
     data_dir = Path(args.data).resolve()
     for subdir in ("work", "logs", "artifacts"):
         (data_dir / subdir).mkdir(parents=True, exist_ok=True)
+    log.info("node: data dir %s (work, logs, artifacts ready)", data_dir)
     runtime, how = await isolation()
-    logging.getLogger(__name__).info("%s build isolation: %s", me.id, how)
+    log.info("%s build isolation: %s", me.id, how)
     env = BuildEnv(str(data_dir), me.id, os.getuid(), os.getgid(), runtime)
     store = Store(str(data_dir / "matrix.db"))
+    log.info("node: store opened %s", data_dir / "matrix.db")
     book = AddressBook(g)
     peers = PeerClient(g, me, book)
     runner = None
@@ -99,19 +134,25 @@ async def run(args: argparse.Namespace) -> None:
     try:
         await cleanup_startup(env)
         expire_artifacts(env, time.time())
+        log.info("node: startup cleanup done (stale containers, work dirs, old artifacts)")
         engine = Engine(g, me, sk, store, peers, env, fault)
         await engine.recover()
+        log.info("node: recovery done")
         runner = web.AppRunner(make_app(engine, store, g, me, env, book))
         await runner.setup()
         site = web.TCPSite(runner, host, port)
         await site.start()
+        log.info("node: HTTP API serving on %s:%d", host, port)
         tasks = [
             asyncio.create_task(engine.build_worker()),
             asyncio.create_task(engine.sync_loop()),
         ]
+        log.info("node: build worker and sync loop started")
         if discovery:  # a bind failure ends this task and the node stops (RFC §7.15)
             tasks.append(asyncio.create_task(Discovery(g, me, sk, book, port, advertise).run()))
-        logging.getLogger(__name__).info("%s listening at %s:%d", me.id, host, port)
+        else:
+            log.info("node: discovery off (--no-discovery): peers come from genesis addr only")
+        log.info("%s listening at %s:%d", me.id, host, port)
         stopped = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -122,6 +163,7 @@ async def run(args: argparse.Namespace) -> None:
             if task is not stop_waiter:
                 task.result()
                 raise RuntimeError("builder worker stopped unexpectedly")
+        log.info("node: stop signal received, shutting down")
     finally:
         if stop_waiter is not None:
             stop_waiter.cancel()
@@ -132,10 +174,12 @@ async def run(args: argparse.Namespace) -> None:
         if runner is not None:
             await runner.cleanup()
         await peers.close()
+        log.info("node: stopped")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    configure_logging(args.verbose)
     try:
         asyncio.run(run(args))
     except ValueError as exc:

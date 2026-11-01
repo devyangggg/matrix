@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import math
 import re
 import time
@@ -13,6 +14,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from .canon import _no_dup_pairs
 
+log = logging.getLogger(__name__)
 HTTP_TIMEOUT_S = 3
 _HEX64 = r"[0-9a-f]{64}"
 
@@ -215,6 +217,8 @@ class PeerClient:
             return None
         # Read on every call, so a new DHCP address is used as soon as its hello arrives.
         addr = (self.book.addr(node_id) if self.book is not None else None) or node.addr
+        if not addr:
+            log.debug("peer %s: no known address, skipped %s", node_id, path)
         return f"http://{addr}{path}" if addr else None
 
     async def _post(self, node_id: str, path: str, envelope: dict) -> None:
@@ -238,8 +242,9 @@ class PeerClient:
                 },
             ) as response:
                 await response.read()
-        except (ClientError, OSError, TimeoutError):
-            pass
+                log.debug("POST %s -> %d", url, response.status)
+        except (ClientError, OSError, TimeoutError) as e:
+            log.debug("POST %s failed: %s: %s", url, type(e).__name__, e)
 
     def _broadcast(self, path: str, envelope: dict, only: list[str] | None = None) -> None:
         for node in self.g.nodes:
@@ -264,17 +269,21 @@ class PeerClient:
         try:
             async with self.session.get(url) as response:
                 if response.status != 200:
+                    log.debug("GET %s -> %d", url, response.status)
                     return None
                 data = await _read_capped(response.content, 1024 * 1024)
                 if data is None:
+                    log.debug("GET %s: body over the size limit", url)
                     return None
+                log.debug("GET %s -> 200, %d bytes", url, len(data))
                 return json.loads(
                     data,
                     object_pairs_hook=_no_dup_pairs,
                     parse_float=_finite_float,
                     parse_constant=_reject_nonfinite,
                 )
-        except (ClientError, OSError, TimeoutError, ValueError):
+        except (ClientError, OSError, TimeoutError, ValueError) as e:
+            log.debug("GET %s failed: %s: %s", url, type(e).__name__, e)
             return None
 
     async def get_bytes(self, node_id: str, path: str, limit: int) -> bytes | None:
@@ -284,9 +293,15 @@ class PeerClient:
         try:
             async with self.session.get(url) as response:
                 if response.status != 200:
+                    log.debug("GET %s -> %d", url, response.status)
                     return None
-                return await _read_capped(response.content, limit)
-        except (ClientError, OSError, TimeoutError, ValueError):
+                data = await _read_capped(response.content, limit)
+                log.debug(
+                    "GET %s -> 200, %s bytes", url, "over limit" if data is None else len(data)
+                )
+                return data
+        except (ClientError, OSError, TimeoutError, ValueError) as e:
+            log.debug("GET %s failed: %s: %s", url, type(e).__name__, e)
             return None
 
     async def close(self) -> None:
